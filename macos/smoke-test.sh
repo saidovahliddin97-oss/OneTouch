@@ -40,7 +40,8 @@ sleep 4
 echo "--- system Bonjour sees:"; (dns-sd -B _onetouch._tcp local & P=$!; sleep 3; kill $P) || true
 grep -q "published" "$T/app.log" && echo "✓ app announced the Mac via system Bonjour (phone can find it)"
 echo "--- PhoneBrowser (app's discovery class) from a CLI process:"
-swiftc -O resolve-probe.swift Sources/PhoneBrowser.swift -o "$T/probe"
+cp resolve-probe.swift "$T/main.swift"
+swiftc -O "$T/main.swift" Sources/PhoneBrowser.swift -o "$T/probe"
 "$T/probe" | tee "$T/probe.log"
 grep -q "probe phones:.*Pixel" "$T/probe.log" || { echo "PhoneBrowser did not find the phone"; exit 1; }
 echo "✓ PhoneBrowser discovers and resolves the phone"
