@@ -34,14 +34,16 @@ import (
 //
 // Control API for the local menu-bar app, bound to 127.0.0.1 only:
 //
-//	POST /local/offer {"paths":[...]}    offer files to phones on the LAN
+//	POST /local/offer {"paths":[...], "targets":[...]}
+//	                                     offer files to phones (targets: phones
+//	                                     already found by the app; else mDNS)
 //	GET  /local/peers                    peers found via mDNS
 type Server struct {
 	Dev    *identity.Device
 	OutDir string
 	Notify bool        // OS notification per received file (CLI use)
 	Events func(Event) // structured events for the menu-bar app
-	Offer  func([]string) (OfferResult, error)
+	Offer  func([]string, []Target) (OfferResult, error)
 	Peers  func() any
 	Logf   func(format string, a ...any)
 
@@ -108,7 +110,8 @@ func (s *Server) localMux() *http.ServeMux {
 	m := http.NewServeMux()
 	m.HandleFunc("POST /local/offer", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Paths []string `json:"paths"`
+			Paths   []string `json:"paths"`
+			Targets []Target `json:"targets"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Paths) == 0 {
 			http.Error(w, "paths required", 400)
@@ -118,7 +121,7 @@ func (s *Server) localMux() *http.ServeMux {
 			http.Error(w, "offers disabled", 501)
 			return
 		}
-		res, err := s.Offer(req.Paths)
+		res, err := s.Offer(req.Paths, req.Targets)
 		if err != nil {
 			writeJSON(w, 502, map[string]string{"error": err.Error()})
 			return

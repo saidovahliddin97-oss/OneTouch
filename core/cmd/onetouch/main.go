@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,8 +132,8 @@ func cmdServe(args []string) error {
 	}
 
 	srv := &transfer.Server{Dev: dev, OutDir: *out, Notify: !*noNotify && !*events, Events: emit, Logf: logf}
-	srv.Offer = func(paths []string) (transfer.OfferResult, error) {
-		res, err := offerToPhones(context.Background(), dev, srv, paths, *port)
+	srv.Offer = func(paths []string, targets []transfer.Target) (transfer.OfferResult, error) {
+		res, err := offerToPhones(context.Background(), dev, srv, paths, targets, *port)
 		if err != nil {
 			logf("offer %v failed: %v", paths, err)
 			emit(transfer.Event{Type: "error", Error: err.Error()})
@@ -162,28 +163,35 @@ func cmdServe(args []string) error {
 	return srv.Run(ctx, apiLn, localLn)
 }
 
-// offerToPhones finds phones via mDNS and announces the files to each one.
-func offerToPhones(ctx context.Context, dev *identity.Device, srv *transfer.Server, paths []string, port int) (transfer.OfferResult, error) {
+// offerToPhones announces the files to the given phones, or, when none are
+// given, to every phone found via mDNS.
+func offerToPhones(ctx context.Context, dev *identity.Device, srv *transfer.Server, paths []string, targets []transfer.Target, port int) (transfer.OfferResult, error) {
 	o, err := transfer.NewOffer(paths, dev.Name, dev.ID, dev.Fingerprint, port)
 	if err != nil {
 		return transfer.OfferResult{}, err
 	}
 	srv.RegisterOffer(o.ID, paths)
-	peers, err := discovery.Browse(ctx, browseWindow, dev.ID)
-	if err != nil {
-		return transfer.OfferResult{}, err
+	if len(targets) == 0 {
+		peers, err := discovery.Browse(ctx, browseWindow, dev.ID)
+		if err != nil {
+			return transfer.OfferResult{}, err
+		}
+		for _, p := range peers {
+			if p.OS == "android" {
+				for _, a := range p.Addrs {
+					targets = append(targets, transfer.Target{Name: p.Name, Host: a, Port: p.Port})
+				}
+			}
+		}
 	}
 	res := transfer.OfferResult{ID: o.ID}
 	var lastErr error
-	for _, p := range peers {
-		if p.OS != "android" {
-			continue
+	for _, t := range targets {
+		if slices.Contains(res.Peers, t.Name) {
+			continue // already reached via another address
 		}
-		for _, a := range p.Addrs {
-			if lastErr = transfer.SendOffer(ctx, a, p.Port, o); lastErr == nil {
-				res.Peers = append(res.Peers, p.Name)
-				break
-			}
+		if lastErr = transfer.SendOffer(ctx, t.Host, t.Port, o); lastErr == nil {
+			res.Peers = append(res.Peers, t.Name)
 		}
 	}
 	if len(res.Peers) == 0 && lastErr != nil {

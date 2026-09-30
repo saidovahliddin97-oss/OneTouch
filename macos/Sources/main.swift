@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private let daemon = Daemon()
     private let clipboard = ClipboardWatcher()
     private let pinch = PinchWatcher()
+    private let phones = PhoneBrowser()
     private var statusItem: NSStatusItem!
     private let statusLine = NSMenuItem(title: "Запуск…", action: nil, keyEquivalent: "")
     private let phoneLine = NSMenuItem(title: "Телефон: ищу…", action: nil, keyEquivalent: "")
@@ -44,6 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             self?.statusLine.title = err.map { "⚠︎ \($0)" } ?? "OneTouch работает"
         }
         daemon.start()
+        phones.onChange = { [weak self] in self?.updatePhoneLine() }
+        phones.start()
 
         clipboard.onFiles = { [weak self] urls in self?.offer(urls.map(\.path), reason: "⌘C") }
         pinch.onPinch = { [weak self] in
@@ -116,14 +119,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if let login = menu.items.first(where: { $0.action == #selector(toggleLogin) }) {
             login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         }
-        guard coreError == nil else { return }
-        phoneLine.title = "Телефон: ищу…"
-        daemon.peers { [weak self] peers in
-            let phones = peers.filter { $0.os == "android" }.map(\.name)
-            self?.phoneLine.title = phones.isEmpty
-                ? "Телефон не найден — откройте OneTouch на Android"
-                : "Телефон: " + phones.joined(separator: ", ")
-        }
+        updatePhoneLine()
+    }
+
+    private func updatePhoneLine() {
+        let names = Set(phones.phones.values.map(\.name)).sorted()
+        phoneLine.title = names.isEmpty
+            ? "Телефон не найден — откройте OneTouch на Android"
+            : "Телефон: " + names.joined(separator: ", ")
     }
 
     @objc private func flip(_ sender: NSMenuItem) {
@@ -180,15 +183,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     // MARK: - Transfers
 
-    private func offer(_ paths: [String], reason: String) {
-        NSLog("OneTouch: offering %@ (%@)", paths.joined(separator: ", "), reason)
-        daemon.offer(paths) { [weak self] result in
+    private func offer(_ paths: [String], reason: String, retry: Bool = true) {
+        NSLog("OneTouch: offering %@ (%@) to %d phone(s)", paths.joined(separator: ", "), reason, phones.phones.count)
+        daemon.offer(paths, to: Array(phones.phones.values)) { [weak self] result in
             let what = paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) файлов"
             switch result {
             case .success(let phones):
                 self?.notify("\(what) → \(phones.joined(separator: ", "))", "Нажмите «Получить» на телефоне")
             case .failure(let e):
                 NSLog("OneTouch: offer failed: %@", e.message)
+                if retry, let self {
+                    // The phone may have changed its address: browse afresh and try once more.
+                    self.phones.refresh()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { self.offer(paths, reason: reason, retry: false) }
+                    return
+                }
                 // Silent for ⌘C: copying files is common and the phone may simply be away.
                 if reason != "⌘C" { self?.notify("Не отправлено", e.message) }
             }

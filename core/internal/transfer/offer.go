@@ -30,6 +30,14 @@ type OfferFile struct {
 	Size int64  `json:"size"`
 }
 
+// Target is a phone address resolved by the caller (the macOS app uses the
+// system Bonjour daemon, since Go cannot browse mDNS reliably on macOS).
+type Target struct {
+	Name string `json:"name"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
 type OfferResult struct {
 	ID    string   `json:"id"`
 	Peers []string `json:"peers"`

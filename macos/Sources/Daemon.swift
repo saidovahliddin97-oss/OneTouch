@@ -98,11 +98,12 @@ final class Daemon {
     }
 
     /// Offers files to phones. Completion gets the phone names or an error text.
-    func offer(_ paths: [String], completion: @escaping (Result<[String], OfferError>) -> Void) {
+    func offer(_ paths: [String], to phones: [PhoneBrowser.Phone], completion: @escaping (Result<[String], OfferError>) -> Void) {
         var req = URLRequest(url: control.appendingPathComponent("local/offer"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["paths": paths])
+        let targets = phones.map { ["name": $0.name, "host": $0.host, "port": $0.port] as [String: Any] }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["paths": paths, "targets": targets])
         req.timeoutInterval = 15
         URLSession.shared.dataTask(with: req) { data, _, error in
             var result: Result<[String], OfferError>
@@ -118,17 +119,6 @@ final class Daemon {
                 result = .failure(OfferError(message: "Пустой ответ от ядра"))
             }
             DispatchQueue.main.async { completion(result) }
-        }.resume()
-    }
-
-    /// Names of devices currently visible on the network.
-    func peers(completion: @escaping ([(name: String, os: String)]) -> Void) {
-        URLSession.shared.dataTask(with: control.appendingPathComponent("local/peers")) { data, _, _ in
-            var list: [(String, String)] = []
-            if let data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                list = arr.map { ($0["name"] as? String ?? "?", $0["os"] as? String ?? "") }
-            }
-            DispatchQueue.main.async { completion(list.map { (name: $0.0, os: $0.1) }) }
         }.resume()
     }
 }
