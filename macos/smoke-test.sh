@@ -30,13 +30,16 @@ echo "✓ received file is in the clipboard"
 
 # Mac → phone: ⌘C on a file
 mkdir -p "$T/phone"
-"$T/fakephone" "$T/phone" > "$T/phone.log" 2>&1 &
+"$T/fakephone" "$T/phone" -no-mdns > "$T/phone.log" 2>&1 &
 PHONE_PID=$!
-sleep 3
+dns-sd -R Pixel-fake01 _onetouch._tcp local 47480 v=2 id=fake01 name=Pixel os=android > /dev/null 2>&1 &
+PHONE_PID="$PHONE_PID $!"
+sleep 4
 echo "--- system Bonjour sees:"; (dns-sd -B _onetouch._tcp local & P=$!; sleep 3; kill $P) || true
 echo "--- Go core (CLI) sees:"; "$T/onetouch" peers || true
 head -c 2000000 /dev/urandom > "$T/to-phone.pdf"
 osascript -e "set the clipboard to (POSIX file \"$T/to-phone.pdf\")"
+osascript -e 'clipboard info' 
 for i in $(seq 1 20); do [ -s "$T/phone/to-phone.pdf" ] && break; sleep 1; done
 sleep 1
 cmp "$T/to-phone.pdf" "$T/phone/to-phone.pdf" || { echo "phone did not get the file"; cat "$T/phone.log"; exit 1; }

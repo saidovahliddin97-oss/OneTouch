@@ -23,11 +23,15 @@ import (
 
 func main() {
 	out := os.Args[1]
-	srv, err := zeroconf.Register("Pixel-fake01", "_onetouch._tcp", "local.", 47480, []string{"v=2", "id=fake01", "name=Pixel", "os=android"}, nil)
-	if err != nil {
-		panic(err)
+	// With -no-mdns the caller announces us (e.g. via macOS `dns-sd -R`),
+	// the way a real phone is announced by its own system responder.
+	if len(os.Args) < 3 || os.Args[2] != "-no-mdns" {
+		srv, err := zeroconf.Register("Pixel-fake01", "_onetouch._tcp", "local.", 47480, []string{"v=2", "id=fake01", "name=Pixel", "os=android"}, nil)
+		if err != nil {
+			panic(err)
+		}
+		defer srv.Shutdown()
 	}
-	defer srv.Shutdown()
 	http.HandleFunc("POST /v1/offer", func(w http.ResponseWriter, r *http.Request) {
 		var o transfer.OfferMsg
 		json.NewDecoder(r.Body).Decode(&o)

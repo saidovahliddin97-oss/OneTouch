@@ -32,6 +32,7 @@ final class ClipboardWatcher {
         let pb = NSPasteboard.general
         guard pb.changeCount != lastCount else { return }
         lastCount = pb.changeCount
+        logLine("clipboard changed: \((pb.types ?? []).map(\.rawValue).joined(separator: ", "))")
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
             let files = urls.filter { !$0.hasDirectoryPath }
             if !files.isEmpty { onFiles?(files) }
@@ -48,6 +49,11 @@ final class ClipboardWatcher {
         let url = dir.appendingPathComponent("Снимок экрана \(f.string(from: Date())).png")
         if (try? png.write(to: url)) != nil { onFiles?([url]) }
     }
+}
+
+/// Unbuffered log line to stderr (captured in tests and by Console).
+func logLine(_ s: String) {
+    FileHandle.standardError.write(Data(("OneTouch: " + s + "\n").utf8))
 }
 
 extension NSImage {

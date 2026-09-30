@@ -184,14 +184,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     // MARK: - Transfers
 
     private func offer(_ paths: [String], reason: String, retry: Bool = true) {
-        NSLog("OneTouch: offering %@ (%@) to %d phone(s)", paths.joined(separator: ", "), reason, phones.phones.count)
+        logLine("offering \(paths.joined(separator: ", ")) (\(reason)) to \(phones.phones.count) phone(s)")
         daemon.offer(paths, to: Array(phones.phones.values)) { [weak self] result in
             let what = paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) файлов"
             switch result {
             case .success(let phones):
                 self?.notify("\(what) → \(phones.joined(separator: ", "))", "Нажмите «Получить» на телефоне")
             case .failure(let e):
-                NSLog("OneTouch: offer failed: %@", e.message)
+                logLine("offer failed: \(e.message)")
                 if retry, let self {
                     // The phone may have changed its address: browse afresh and try once more.
                     self.phones.refresh()

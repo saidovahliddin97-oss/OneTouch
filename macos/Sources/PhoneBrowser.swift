@@ -47,6 +47,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
         let txt = NetService.dictionary(fromTXTRecord: data).mapValues { String(decoding: $0, as: UTF8.self) }
         guard txt["os"] == "android", let host = Self.address(service.addresses ?? []) else { return }
         phones[service.name] = Phone(name: txt["name"] ?? service.name, host: host, port: service.port)
+        logLine("phone found: \(service.name) at \(host):\(service.port)")
         onChange?()
     }
 
