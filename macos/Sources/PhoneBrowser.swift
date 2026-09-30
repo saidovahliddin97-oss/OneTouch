@@ -15,6 +15,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     private(set) var phones: [String: Phone] = [:]   // keyed by service instance name
     private var browser = NetServiceBrowser()
     private var resolving: [NetService] = []           // NetService must be retained while resolving
+    private var attempts: [String: Int] = [:]
 
     func start() {
         browser.delegate = self
@@ -27,6 +28,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
         browser = NetServiceBrowser()
         phones.removeAll()
         resolving.removeAll()
+        attempts.removeAll()
         start()
     }
 
@@ -38,8 +40,9 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
         logLine("bonjour found: \(service.name)")
         resolving.append(service)
+        attempts[service.name] = 0
         service.delegate = self
-        service.resolve(withTimeout: 5)
+        service.resolve(withTimeout: 8)
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
@@ -60,7 +63,17 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         logLine("bonjour resolve failed: \(sender.name) \(errorDict)")
-        resolving.removeAll { $0 == sender }
+        // Resolution can time out while the phone's radio is asleep: retry with backoff.
+        let n = (attempts[sender.name] ?? 0) + 1
+        attempts[sender.name] = n
+        if n <= 5, resolving.contains(sender) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(n * 2)) { [weak self] in
+                guard let self, self.resolving.contains(sender) else { return }
+                sender.resolve(withTimeout: 8)
+            }
+        } else {
+            resolving.removeAll { $0 == sender }
+        }
     }
 
     /// First IPv4 address (falls back to IPv6) from a list of sockaddr blobs.
