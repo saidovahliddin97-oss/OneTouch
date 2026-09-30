@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#0b0d12">
+<title>OneTouch</title>
+<style>
+:root{--bg:#0b0d12;--card:#151923;--line:#232a38;--fg:#e8ecf3;--mut:#8b95a8;--acc:#4f8cff;--ok:#2fbf71;--err:#ff5d5d}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:16px;padding-bottom:96px}
+h1{font-size:20px;margin:0 0 2px}
+.sub{color:var(--mut);font-size:14px;margin-bottom:16px}
+.pick{display:block;width:100%;padding:18px;border:1px dashed var(--line);border-radius:16px;background:var(--card);color:var(--fg);font-size:17px;text-align:center}
+.hint{color:var(--mut);font-size:13px;margin:12px 2px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+.tile{position:relative;aspect-ratio:1;border-radius:14px;overflow:hidden;background:var(--card);border:1px solid var(--line);touch-action:pan-y;transition:transform .15s ease,opacity .2s}
+.tile.pinching{transition:none}
+.tile img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
+.tile .doc{display:flex;align-items:center;justify-content:center;height:100%;padding:10px;text-align:center;font-size:13px;word-break:break-all;color:var(--mut)}
+.tile .bar{position:absolute;left:0;bottom:0;height:4px;width:0;background:var(--acc);transition:width .1s}
+.tile .badge{position:absolute;top:6px;left:6px;font-size:12px;padding:2px 8px;border-radius:99px;background:#000a}
+.tile .send{position:absolute;right:6px;bottom:10px;border:0;border-radius:99px;padding:6px 12px;background:#000b;color:#fff;font-size:13px}
+.tile.armed{outline:3px solid var(--acc)}
+.tile.done .badge{background:var(--ok)}
+.tile.fail .badge{background:var(--err)}
+.pull{margin-top:22px;padding:14px;border-radius:14px;background:var(--card);border:1px solid var(--line)}
+.pull a{color:var(--acc)}
+.foot{position:fixed;left:0;right:0;bottom:0;padding:12px 16px;background:linear-gradient(transparent,var(--bg) 30%)}
+.foot button{width:100%;padding:16px;border:0;border-radius:14px;background:var(--acc);color:#fff;font-size:17px;font-weight:600}
+.foot button:disabled{opacity:.4}
+</style>
+</head>
+<body>
+<h1>OneTouch → <span id="peer">…</span></h1>
+<div class="sub">Прямая передача по Wi‑Fi, без интернета</div>
+
+<label class="pick">📷 Выбрать фото / файлы<input id="files" type="file" multiple hidden></label>
+<div class="hint">🤏 <b>Щипок</b> по фото — в буфер (на компьютере: хоткей/жест «вставить»). <b>↑</b> — сразу на рабочий стол.</div>
+<div class="grid" id="grid"></div>
+
+<div class="pull" id="pull">Буфер компьютера: <span id="clip">пусто</span></div>
+
+<div class="foot"><button id="all" disabled>Отправить всё на рабочий стол</button></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const grid = $('#grid'), allBtn = $('#all');
+const items = [];
+
+fetch('/web/info').then(r => r.json()).then(i => { $('#peer').textContent = i.name; document.title = 'OneTouch → ' + i.name; });
+
+function refreshClip() {
+  fetch('/web/clip').then(r => r.ok ? r.json() : null).then(m => {
+    $('#clip').innerHTML = m ? `<a href="/web/clip/data" download>${esc(m.name)}</a> (${fmt(m.size)})` : 'пусто';
+  }).catch(() => {});
+}
+refreshClip();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshClip(); });
+
+function esc(s) { return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmt(n) { const u = ['B','KB','MB','GB']; let i = 0; while (n >= 1024 && i < 3) { n /= 1024; i++; } return n.toFixed(i ? 1 : 0) + ' ' + u[i]; }
+
+$('#files').addEventListener('change', e => {
+  for (const f of e.target.files) addTile(f);
+  e.target.value = '';
+  allBtn.disabled = !items.some(it => !it.sent);
+});
+
+function addTile(file) {
+  const el = document.createElement('div');
+  el.className = 'tile';
+  el.innerHTML = file.type.startsWith('image/')
+    ? `<img alt="">` : `<div class="doc">📄<br>${esc(file.name)}</div>`;
+  if (file.type.startsWith('image/')) el.querySelector('img').src = URL.createObjectURL(file);
+  el.insertAdjacentHTML('beforeend', `<span class="badge">${fmt(file.size)}</span><button class="send">↑</button><div class="bar"></div>`);
+  const it = { file, el, sent: false, busy: false };
+  items.push(it);
+  el.querySelector('.send').onclick = () => upload(it, 'save');
+  attachPinch(it);
+  grid.appendChild(el);
+}
+
+// Pinch-in (two fingers moving together) sends the item to the peer's buffer.
+function attachPinch(it) {
+  const el = it.el; let d0 = 0, armed = false;
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  el.addEventListener('touchstart', e => {
+    if (e.touches.length === 2) { d0 = dist(e.touches); armed = false; el.classList.add('pinching'); }
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    if (e.touches.length !== 2 || !d0) return;
+    e.preventDefault();
+    const s = Math.min(1, dist(e.touches) / d0);
+    el.style.transform = `scale(${Math.max(0.35, s)})`;
+    const nowArmed = s < 0.6;
+    if (nowArmed && !armed && navigator.vibrate) navigator.vibrate(20);
+    armed = nowArmed; el.classList.toggle('armed', armed);
+  }, { passive: false });
+  const end = e => {
+    if (!d0 || (e.touches && e.touches.length >= 2)) return;
+    el.classList.remove('pinching', 'armed'); el.style.transform = '';
+    if (armed) upload(it, 'clip');
+    d0 = 0; armed = false;
+  };
+  el.addEventListener('touchend', end); el.addEventListener('touchcancel', end);
+}
+
+function upload(it, mode) {
+  if (it.busy) return;
+  it.busy = true; it.el.classList.remove('done', 'fail');
+  const badge = it.el.querySelector('.badge'), bar = it.el.querySelector('.bar');
+  badge.textContent = mode === 'clip' ? '📋 …' : '↑ …';
+  return new Promise(resolve => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', `/web/files?mode=${mode}&from=${encodeURIComponent('Телефон (браузер)')}&name=${encodeURIComponent(it.file.name)}`);
+    x.upload.onprogress = e => { if (e.lengthComputable) bar.style.width = (100 * e.loaded / e.total) + '%'; };
+    x.onload = () => {
+      const ok = x.status === 200; it.busy = false; it.sent = it.sent || ok;
+      it.el.classList.add(ok ? 'done' : 'fail');
+      badge.textContent = ok ? (mode === 'clip' ? '📋 в буфере' : '✓ на столе') : '✕ ошибка ' + x.status;
+      if (ok && navigator.vibrate) navigator.vibrate([15, 40, 15]);
+      allBtn.disabled = !items.some(i => !i.sent); if (ok) refreshClip(); resolve(ok);
+    };
+    x.onerror = () => { it.busy = false; it.el.classList.add('fail'); badge.textContent = '✕ нет связи'; resolve(false); };
+    x.send(it.file);
+  });
+}
+
+allBtn.onclick = async () => {
+  allBtn.disabled = true;
+  for (const it of items) if (!it.sent) await upload(it, 'save');
+  allBtn.disabled = !items.some(i => !i.sent);
+};
+</script>
+</body>
+</html>
