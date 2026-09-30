@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private let phoneLine = NSMenuItem(title: "Телефон: ищу…", action: nil, keyEquivalent: "")
     private var lastReceived: URL?
     private var coreError: String?
+    private var warnedLocalNetwork = false
     private let defaults = UserDefaults.standard
 
     private enum Key {
@@ -97,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         m.addItem(login)
         m.addItem(.separator())
+        m.addItem(item("Настройки «Локальная сеть»…", #selector(openLocalNetworkSettings), ""))
         m.addItem(item("Журнал", #selector(openLog), ""))
         m.addItem(item("Выйти из OneTouch", #selector(quit), "q"))
         statusItem.menu = m
@@ -124,9 +126,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func updatePhoneLine() {
         let names = Set(phones.phones.values.map(\.name)).sorted()
-        phoneLine.title = names.isEmpty
-            ? "Телефон не найден — откройте OneTouch на Android"
-            : "Телефон: " + names.joined(separator: ", ")
+        if !names.isEmpty {
+            phoneLine.title = "Телефон: " + names.joined(separator: ", ")
+        } else if phones.unresolvedCount > 0 {
+            phoneLine.title = "⚠︎ Разрешите OneTouch «Локальную сеть» в настройках"
+            if !warnedLocalNetwork {
+                warnedLocalNetwork = true
+                notify("Нужен доступ к локальной сети",
+                       "Системные настройки → Конфиденциальность и безопасность → Локальная сеть → включите OneTouch")
+            }
+        } else {
+            phoneLine.title = "Телефон не найден — откройте OneTouch на Android"
+        }
     }
 
     @objc private func flip(_ sender: NSMenuItem) {
@@ -170,6 +181,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if let u = lastReceived {
             NSWorkspace.shared.activateFileViewerSelecting([u])
         }
+    }
+
+    @objc private func openLocalNetworkSettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func openLog() {

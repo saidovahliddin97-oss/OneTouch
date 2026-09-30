@@ -11,7 +11,9 @@ T=$(mktemp -d)
 
 mkdir -p ~/Desktop
 PHONE_PID=""
-"$APP/Contents/MacOS/OneTouch" > "$T/app.log" 2>&1 &
+# CI cannot click "Allow" on the Local Network prompt, so the app itself cannot
+# resolve Bonjour services here; the hook hands it the phone's address instead.
+ONETOUCH_EXTRA_PHONE=127.0.0.1:47480 "$APP/Contents/MacOS/OneTouch" > "$T/app.log" 2>&1 &
 APP_PID=$!
 trap 'kill $APP_PID $PHONE_PID 2>/dev/null || true; echo "--- core log:"; cat ~/Library/Logs/OneTouch.log || true; echo "--- app log:"; cat "$T/app.log"; echo "--- phone log:"; cat "$T/phone.log" 2>/dev/null || true' EXIT
 for i in $(seq 1 30); do curl -sf http://127.0.0.1:47471/local/peers >/dev/null && break; sleep 1; done
@@ -37,12 +39,13 @@ PHONE_PID="$PHONE_PID $!"
 sleep 4
 echo "--- system Bonjour sees:"; (dns-sd -B _onetouch._tcp local & P=$!; sleep 3; kill $P) || true
 grep -q "published" "$T/app.log" && echo "✓ app announced the Mac via system Bonjour (phone can find it)"
-echo "--- CLI NetService probe:"; swiftc -O resolve-probe.swift -o "$T/probe" 2>/dev/null && "$T/probe" || true
+echo "--- PhoneBrowser (app's discovery class) from a CLI process:"
+swiftc -O resolve-probe.swift Sources/PhoneBrowser.swift -o "$T/probe"
+"$T/probe" | tee "$T/probe.log"
+grep -q "probe phones:.*Pixel" "$T/probe.log" || { echo "PhoneBrowser did not find the phone"; exit 1; }
+echo "✓ PhoneBrowser discovers and resolves the phone"
 echo "--- Go core (CLI) sees:"; "$T/onetouch" peers | tee "$T/peers.txt" || true
 grep -q "Pixel.*android" "$T/peers.txt" && echo "✓ mDNS: the core's discovery finds a phone announced by the system responder"
-for i in $(seq 1 40); do grep -q "phone found: Pixel" "$T/app.log" && break; sleep 1; done
-grep -q "phone found: Pixel" "$T/app.log" || { echo "app did not discover the phone via Bonjour"; exit 1; }
-echo "✓ app discovered the phone via Bonjour"
 head -c 2000000 /dev/urandom > "$T/to-phone.pdf"
 osascript -e "set the clipboard to (POSIX file \"$T/to-phone.pdf\")"
 osascript -e 'clipboard info' 

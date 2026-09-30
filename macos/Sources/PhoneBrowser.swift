@@ -17,6 +17,9 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     private var resolving: [NetService] = []           // NetService must be retained while resolving
     private var attempts: [String: Int] = [:]
     private var published: NetService?
+    /// Services seen but never resolved: the classic symptom of a denied
+    /// Local Network permission (browsing works, resolving times out).
+    private(set) var unresolvedCount = 0
 
     /// Announces this Mac (the core's TLS port and certificate fingerprint).
     func publish(name: String, id: String, fp: String, port: Int) {
@@ -45,6 +48,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
         phones.removeAll()
         resolving.removeAll()
         attempts.removeAll()
+        unresolvedCount = 0
         start()
     }
 
@@ -72,6 +76,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
         let txt = NetService.dictionary(fromTXTRecord: data).mapValues { String(decoding: $0, as: UTF8.self) }
         logLine("resolved \(service.name): txt=\(txt) addrs=\(service.addresses?.count ?? 0)")
         guard txt["os"] == "android", let host = Self.address(service.addresses ?? []) else { return }
+        if (attempts[service.name] ?? 0) >= 2 { unresolvedCount = max(0, unresolvedCount - 1) }
         phones[service.name] = Phone(name: txt["name"] ?? service.name, host: host, port: service.port)
         logLine("phone found: \(service.name) at \(host):\(service.port)")
         onChange?()
@@ -82,6 +87,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
         // Resolution can time out while the phone's radio is asleep: retry with backoff.
         let n = (attempts[sender.name] ?? 0) + 1
         attempts[sender.name] = n
+        if n == 2 { unresolvedCount += 1; onChange?() }
         if n <= 5, resolving.contains(sender) {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(n * 2)) { [weak self] in
                 guard let self, self.resolving.contains(sender) else { return }
