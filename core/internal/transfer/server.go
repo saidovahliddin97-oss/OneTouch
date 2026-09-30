@@ -53,7 +53,10 @@ type Server struct {
 
 // Event is emitted as one JSON line on stdout with `serve --events`.
 type Event struct {
-	Type  string   `json:"type"` // received | offered | error
+	Type  string   `json:"type"` // ready | received | offered | error
+	ID    string   `json:"id,omitempty"`
+	FP    string   `json:"fp,omitempty"`
+	Port  int      `json:"port,omitempty"`
 	Path  string   `json:"path,omitempty"`
 	Name  string   `json:"name,omitempty"`
 	From  string   `json:"from,omitempty"`

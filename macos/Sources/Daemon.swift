@@ -10,6 +10,9 @@ final class Daemon {
         let from: String?
         let error: String?
         let peers: [String]
+        let id: String?
+        let fp: String?
+        let port: Int?
     }
 
     var onEvent: ((Event) -> Void)?
@@ -36,7 +39,9 @@ final class Daemon {
         }
         let p = Process()
         p.executableURL = bin
-        p.arguments = ["serve", "--events", "--name", Host.current().localizedName ?? "Mac"]
+        // mDNS is done by the app through the system Bonjour daemon: a second
+        // responder in the core would fight mDNSResponder over the host name.
+        p.arguments = ["serve", "--events", "--no-mdns", "--name", Host.current().localizedName ?? "Mac"]
         let out = Pipe()
         let err = Pipe()
         p.standardOutput = out
@@ -92,7 +97,10 @@ final class Daemon {
                 name: obj["name"] as? String,
                 from: obj["from"] as? String,
                 error: obj["error"] as? String,
-                peers: obj["peers"] as? [String] ?? []
+                peers: obj["peers"] as? [String] ?? [],
+                id: obj["id"] as? String,
+                fp: obj["fp"] as? String,
+                port: obj["port"] as? Int
             ))
         }
     }

@@ -16,6 +16,22 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     private var browser = NetServiceBrowser()
     private var resolving: [NetService] = []           // NetService must be retained while resolving
     private var attempts: [String: Int] = [:]
+    private var published: NetService?
+
+    /// Announces this Mac (the core's TLS port and certificate fingerprint).
+    func publish(name: String, id: String, fp: String, port: Int) {
+        published?.stop()
+        let suffix = "-" + id.prefix(6)
+        var base = name.replacingOccurrences(of: ".", with: "-")
+        while base.utf8.count > 63 - suffix.utf8.count { base.removeLast() }
+        let svc = NetService(domain: "local.", type: "_onetouch._tcp.", name: base + suffix, port: Int32(port))
+        let txt: [String: Data] = ["v": "2", "id": id, "name": name, "os": "darwin", "fp": fp]
+            .mapValues { Data($0.utf8) }
+        svc.setTXTRecord(NetService.data(fromTXTRecord: txt))
+        svc.publish()
+        published = svc
+        logLine("published \(svc.name) on port \(port)")
+    }
 
     func start() {
         browser.delegate = self

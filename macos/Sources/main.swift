@@ -213,6 +213,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func handle(_ e: Daemon.Event) {
         switch e.type {
+        case "ready":
+            if let id = e.id, let fp = e.fp, let port = e.port {
+                phones.publish(name: e.name ?? "Mac", id: id, fp: fp, port: port)
+            }
         case "received":
             guard let path = e.path else { return }
             let url = URL(fileURLWithPath: path)

@@ -97,6 +97,7 @@ func cmdServe(args []string) error {
 	out := fs.String("out", transfer.DesktopDir(), "куда сохранять файлы")
 	events := fs.Bool("events", false, "печатать события JSON-строками (для приложения в строке меню)")
 	noNotify := fs.Bool("no-notify", false, "без системных уведомлений")
+	noMDNS := fs.Bool("no-mdns", false, "не объявлять себя по mDNS (это делает приложение через системный Bonjour)")
 	parse(fs, args)
 
 	dev, err := identity.Load(*name)
@@ -148,14 +149,17 @@ func cmdServe(args []string) error {
 		return ps
 	}
 
-	mdns, err := discovery.Announce(discovery.Announcement{
-		ID: dev.ID, Name: dev.Name, OS: dev.OS, Fingerprint: dev.Fingerprint, Port: *port,
-	})
-	if err != nil {
-		logf("⚠ mDNS недоступен: %v", err)
-	} else {
-		defer mdns.Shutdown()
+	if !*noMDNS {
+		mdns, err := discovery.Announce(discovery.Announcement{
+			ID: dev.ID, Name: dev.Name, OS: dev.OS, Fingerprint: dev.Fingerprint, Port: *port,
+		})
+		if err != nil {
+			logf("⚠ mDNS недоступен: %v", err)
+		} else {
+			defer mdns.Shutdown()
+		}
 	}
+	emit(transfer.Event{Type: "ready", ID: dev.ID, Name: dev.Name, FP: dev.Fingerprint, Port: *port})
 	logf("OneTouch %s • %s • сохраняю в %s • жду файлы…", version, dev.Name, *out)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
