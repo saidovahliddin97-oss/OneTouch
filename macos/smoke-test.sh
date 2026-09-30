@@ -33,6 +33,8 @@ mkdir -p "$T/phone"
 "$T/fakephone" "$T/phone" > "$T/phone.log" 2>&1 &
 PHONE_PID=$!
 sleep 3
+echo "--- system Bonjour sees:"; (dns-sd -B _onetouch._tcp local & P=$!; sleep 3; kill $P) || true
+echo "--- Go core (CLI) sees:"; "$T/onetouch" peers || true
 head -c 2000000 /dev/urandom > "$T/to-phone.pdf"
 osascript -e "set the clipboard to (POSIX file \"$T/to-phone.pdf\")"
 for i in $(seq 1 20); do [ -s "$T/phone/to-phone.pdf" ] && break; sleep 1; done
