@@ -1,14 +1,12 @@
 package transfer
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -95,88 +93,4 @@ func writeAtomic(dir, name string, r io.Reader) (string, int64, error) {
 		return "", n, err
 	}
 	return final, n, nil
-}
-
-// ClipMeta describes the item in the ecosystem clipboard buffer.
-type ClipMeta struct {
-	Name string    `json:"name"`
-	Size int64     `json:"size"`
-	From string    `json:"from"`
-	Time time.Time `json:"time"`
-}
-
-// Buffer is the single-slot "ecosystem clipboard": a new clip replaces the
-// previous one; pasting copies it out and keeps it (like a normal clipboard).
-type Buffer struct {
-	Dir string
-	mu  sync.Mutex
-}
-
-func (b *Buffer) itemPath() string { return filepath.Join(b.Dir, "item.bin") }
-func (b *Buffer) metaPath() string { return filepath.Join(b.Dir, "meta.json") }
-
-func (b *Buffer) Put(r io.Reader, name, from string) (ClipMeta, error) {
-	if err := os.MkdirAll(b.Dir, 0o700); err != nil {
-		return ClipMeta{}, err
-	}
-	tmp, err := os.CreateTemp(b.Dir, ".incoming-*")
-	if err != nil {
-		return ClipMeta{}, err
-	}
-	n, err := io.CopyBuffer(tmp, r, make([]byte, 1<<20))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		os.Remove(tmp.Name())
-		return ClipMeta{}, err
-	}
-	m := ClipMeta{Name: SafeName(name), Size: n, From: from, Time: time.Now()}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	os.Remove(b.itemPath())
-	if err := os.Rename(tmp.Name(), b.itemPath()); err != nil {
-		os.Remove(tmp.Name())
-		return ClipMeta{}, err
-	}
-	mb, _ := json.Marshal(m)
-	return m, os.WriteFile(b.metaPath(), mb, 0o600)
-}
-
-func (b *Buffer) Get() (ClipMeta, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	mb, err := os.ReadFile(b.metaPath())
-	if err != nil {
-		return ClipMeta{}, false
-	}
-	var m ClipMeta
-	if json.Unmarshal(mb, &m) != nil {
-		return ClipMeta{}, false
-	}
-	if _, err := os.Stat(b.itemPath()); err != nil {
-		return ClipMeta{}, false
-	}
-	return m, true
-}
-
-// Open returns a reader over the buffered item.
-func (b *Buffer) Open() (*os.File, ClipMeta, error) {
-	m, ok := b.Get()
-	if !ok {
-		return nil, m, os.ErrNotExist
-	}
-	f, err := os.Open(b.itemPath())
-	return f, m, err
-}
-
-// PasteTo copies the buffered item into dir and returns the resulting path.
-func (b *Buffer) PasteTo(dir string) (string, ClipMeta, error) {
-	f, m, err := b.Open()
-	if err != nil {
-		return "", m, err
-	}
-	defer f.Close()
-	p, _, err := writeAtomic(dir, m.Name, f)
-	return p, m, err
 }

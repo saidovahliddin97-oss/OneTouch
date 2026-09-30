@@ -19,20 +19,20 @@ jobs:
         with:
           go-version-file: core/go.mod
           cache-dependency-path: core/go.sum
-      - name: Vet
+      - name: Vet and test
         working-directory: core
-        run: go vet ./...
-      - name: Cross-compile
+        run: go vet ./... && go test ./...
+      - name: Cross-compile CLI
         working-directory: core
         run: |
           mkdir -p ../out
-          for t in darwin/arm64 darwin/amd64 windows/amd64 windows/arm64 linux/amd64 linux/arm64; do
+          for t in windows/amd64 windows/arm64 linux/amd64 linux/arm64; do
             os=${t%/*}; ar=${t#*/}; ext=""; [ "$os" = windows ] && ext=.exe
             CGO_ENABLED=0 GOOS=$os GOARCH=$ar go build -trimpath -ldflags "-s -w" -o ../out/onetouch-$os-$ar$ext ./cmd/onetouch
           done
       - uses: actions/upload-artifact@v4
         with:
-          name: onetouch-desktop
+          name: onetouch-cli
           path: out/*
 
   android:
@@ -42,31 +42,48 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-      - name: Test
-        working-directory: app
-        run: flutter test
-      - name: Build APK
-        working-directory: app
-        run: flutter build apk --release && cp build/app/outputs/flutter-apk/app-release.apk ../OneTouch.apk
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Lint and build APK
+        working-directory: android
+        run: ./gradlew --no-daemon lintRelease assembleRelease && cp app/build/outputs/apk/release/app-release.apk ../OneTouch.apk
       - uses: actions/upload-artifact@v4
         with:
           name: onetouch-android
           path: OneTouch.apk
 
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+      - name: Build OneTouch.app
+        run: sh macos/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onetouch-mac
+          path: macos/build/OneTouch-mac.zip
+
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [core, android]
+    if: github.event_name == 'push'
+    needs: [core, android, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: rel
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: rel/*
+      - name: Publish "latest-build" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG=latest-build
+          [ "${GITHUB_REF_TYPE}" = tag ] && TAG="${GITHUB_REF_NAME}"
+          gh release delete "$TAG" --cleanup-tag -y || true
+          gh release create "$TAG" rel/* --target "$GITHUB_SHA" --prerelease \
+            --title "OneTouch — последняя сборка" \
+            --notes "Mac: OneTouch-mac.zip · Android: OneTouch.apk · Windows/Linux CLI: onetouch-*. Сборка ${GITHUB_SHA::7}."

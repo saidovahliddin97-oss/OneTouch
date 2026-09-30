@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>OneTouch</string>
+    <key>CFBundleDisplayName</key><string>OneTouch</string>
+    <key>CFBundleIdentifier</key><string>app.onetouch.mac</string>
+    <key>CFBundleExecutable</key><string>OneTouch</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>OneTouch передаёт файлы напрямую между этим Mac и вашим телефоном по Wi‑Fi.</string>
+    <key>NSBonjourServices</key>
+    <array><string>_onetouch._tcp</string></array>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Чтобы по щипку на тачпаде отправить на телефон файлы, выделенные в Finder.</string>
+</dict>
+</plist>

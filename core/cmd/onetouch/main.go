@@ -1,45 +1,47 @@
-// Command onetouch is the OneTouch desktop/CLI node: it announces itself over
-// mDNS, receives files over TLS, serves a zero-install web page for phones,
-// and sends/pastes files to and from peers.
+// Command onetouch is the OneTouch desktop node: it announces itself over
+// mDNS, receives files from phones over TLS, and offers files to phones.
+// The macOS menu-bar app runs it as `onetouch serve --events`.
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
-
-	"github.com/mdp/qrterminal/v3"
 
 	"github.com/saidovahliddin97-oss/onetouch/core/internal/discovery"
 	"github.com/saidovahliddin97-oss/onetouch/core/internal/identity"
 	"github.com/saidovahliddin97-oss/onetouch/core/internal/transfer"
 )
 
-var version = "0.1.0"
+var version = "0.2.0"
+
+const (
+	defaultPort  = 47470
+	controlPort  = 47471 // loopback only
+	browseWindow = 1500 * time.Millisecond
+)
 
 const usage = `OneTouch %s — мгновенная передача файлов по локальной сети (P2P, TLS, mDNS)
 
-Использование:
-  onetouch serve  [--name N] [--out DIR] [--auto-save]   запустить узел (приём + веб для телефона)
-  onetouch peers                                         найти устройства в сети
-  onetouch send   <файл...> [--to ИМЯ]                   отправить файл(ы) на рабочий стол пира
-  onetouch clip   <файл>    [--to ИМЯ]                   положить файл в буфер пира («копировать»)
-  onetouch paste  [--out DIR] [--from ИМЯ]               вставить файл из буфера («вставить»)
-  onetouch copy   <файл>                                 положить файл в свой буфер (пиры заберут)
-  onetouch id                                            показать имя и отпечаток сертификата
-
-Без mDNS (если роутер режет multicast):  --addr 192.168.1.20:47470 [--fp ОТПЕЧАТОК]
+  onetouch serve  [--name N] [--out DIR]        узел: принимает файлы с телефона
+  onetouch offer  <файл...>                     предложить файлы телефону (там появится «Получить»)
+  onetouch send   <файл...> [--to ИМЯ]          отправить файл другому компьютеру
+  onetouch peers                                устройства в сети
+  onetouch id     [--name N]                    имя и отпечаток сертификата
 `
 
 func main() {
@@ -52,16 +54,12 @@ func main() {
 	switch cmd {
 	case "serve":
 		err = cmdServe(args)
+	case "offer":
+		err = cmdOffer(args)
+	case "send":
+		err = cmdSend(args)
 	case "peers":
 		err = cmdPeers(args)
-	case "send":
-		err = cmdSend(args, "save")
-	case "clip":
-		err = cmdSend(args, "clip")
-	case "paste":
-		err = cmdPaste(args)
-	case "copy":
-		err = cmdCopy(args)
 	case "id":
 		err = cmdID(args)
 	case "version", "--version", "-v":
@@ -91,31 +89,13 @@ func parse(fs *flag.FlagSet, args []string) []string {
 	}
 }
 
-func buffer(dev *identity.Device) *transfer.Buffer {
-	return &transfer.Buffer{Dir: filepath.Join(dev.Dir, "buffer")}
-}
-
-func webToken(dev *identity.Device) string {
-	p := filepath.Join(dev.Dir, "web-token")
-	if b, err := os.ReadFile(p); err == nil && len(strings.TrimSpace(string(b))) >= 16 {
-		return strings.TrimSpace(string(b))
-	}
-	buf := make([]byte, 12)
-	rand.Read(buf)
-	t := hex.EncodeToString(buf)
-	os.WriteFile(p, []byte(t), 0o600)
-	return t
-}
-
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	name := fs.String("name", "", "имя устройства в сети")
-	port := fs.Int("port", 47470, "TLS-порт API")
-	webPort := fs.Int("web-port", 47471, "HTTP-порт веб-страницы для телефона")
+	port := fs.Int("port", defaultPort, "TLS-порт")
 	out := fs.String("out", transfer.DesktopDir(), "куда сохранять файлы")
-	autoSave := fs.Bool("auto-save", false, "класть «щипки» сразу на рабочий стол, минуя буфер")
+	events := fs.Bool("events", false, "печатать события JSON-строками (для приложения в строке меню)")
 	noNotify := fs.Bool("no-notify", false, "без системных уведомлений")
-	noQR := fs.Bool("no-qr", false, "не печатать QR-код")
 	parse(fs, args)
 
 	dev, err := identity.Load(*name)
@@ -124,78 +104,131 @@ func cmdServe(args []string) error {
 	}
 	apiLn, err := net.Listen("tcp", ":"+strconv.Itoa(*port))
 	if err != nil {
-		return fmt.Errorf("порт %d занят (onetouch уже запущен?): %w", *port, err)
+		return fmt.Errorf("порт %d занят (OneTouch уже запущен?): %w", *port, err)
 	}
-	webLn, err := net.Listen("tcp", ":"+strconv.Itoa(*webPort))
+	localLn, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(controlPort))
 	if err != nil {
-		return fmt.Errorf("порт %d занят: %w", *webPort, err)
+		return fmt.Errorf("порт %d занят: %w", controlPort, err)
 	}
-	token := webToken(dev)
-	srv := &transfer.Server{
-		Dev: dev, OutDir: *out, Buffer: buffer(dev), AutoSave: *autoSave,
-		Token: token, Notify: !*noNotify,
-		Logf: func(f string, a ...any) { fmt.Printf(time.Now().Format("15:04:05 ")+f+"\n", a...) },
+
+	var outMu sync.Mutex
+	emit := func(e transfer.Event) {
+		if !*events {
+			return
+		}
+		b, _ := json.Marshal(e)
+		outMu.Lock()
+		os.Stdout.Write(append(b, '\n'))
+		outMu.Unlock()
 	}
+	logf := func(f string, a ...any) {
+		line := time.Now().Format("15:04:05 ") + fmt.Sprintf(f, a...)
+		if *events {
+			fmt.Fprintln(os.Stderr, line) // stdout is reserved for JSON events
+		} else {
+			fmt.Println(line)
+		}
+	}
+
+	srv := &transfer.Server{Dev: dev, OutDir: *out, Notify: !*noNotify && !*events, Events: emit, Logf: logf}
+	srv.Offer = func(paths []string) (transfer.OfferResult, error) {
+		res, err := offerToPhones(context.Background(), dev, srv, paths, *port)
+		if err != nil {
+			emit(transfer.Event{Type: "error", Error: err.Error()})
+		} else {
+			emit(transfer.Event{Type: "offered", Name: filepath.Base(paths[0]), Peers: res.Peers})
+		}
+		return res, err
+	}
+	srv.Peers = func() any {
+		ps, _ := discovery.Browse(context.Background(), browseWindow, dev.ID)
+		return ps
+	}
+
 	mdns, err := discovery.Announce(discovery.Announcement{
-		ID: dev.ID, Name: dev.Name, OS: dev.OS, Fingerprint: dev.Fingerprint, Port: *port, WebPort: *webPort,
+		ID: dev.ID, Name: dev.Name, OS: dev.OS, Fingerprint: dev.Fingerprint, Port: *port,
 	})
 	if err != nil {
-		fmt.Println("⚠ mDNS недоступен:", err, "— используйте --addr")
+		logf("⚠ mDNS недоступен: %v", err)
 	} else {
 		defer mdns.Shutdown()
 	}
-
-	fmt.Printf("OneTouch %s  •  %s (%s)\n", version, dev.Name, dev.OS)
-	fmt.Printf("  отпечаток: %s\n", dev.Fingerprint)
-	fmt.Printf("  сохраняю в: %s\n", *out)
-	fmt.Printf("  API (TLS):  :%d   mDNS: %s\n", *port, discovery.Service)
-	ips := discovery.LocalIPv4()
-	for i, ip := range ips {
-		u := fmt.Sprintf("http://%s:%d/?t=%s", ip, *webPort, token)
-		fmt.Printf("  📱 телефон:  %s\n", u)
-		if i == 0 && !*noQR {
-			fmt.Println("\n  Наведите камеру телефона (та же Wi‑Fi сеть):")
-			qrterminal.GenerateWithConfig(u, qrterminal.Config{
-				Level: qrterminal.L, Writer: os.Stdout, HalfBlocks: true,
-				BlackChar: qrterminal.BLACK_BLACK, WhiteBlackChar: qrterminal.WHITE_BLACK,
-				WhiteChar: qrterminal.WHITE_WHITE, BlackWhiteChar: qrterminal.BLACK_WHITE, QuietZone: 2,
-			})
-		}
-	}
-	if len(ips) == 0 {
-		fmt.Println("  ⚠ нет локального IPv4 — подключитесь к Wi‑Fi")
-	}
-	fmt.Println("Жду файлы… (Ctrl+C — выход)")
+	logf("OneTouch %s • %s • сохраняю в %s • жду файлы…", version, dev.Name, *out)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return srv.Run(ctx, apiLn, webLn)
+	return srv.Run(ctx, apiLn, localLn)
 }
 
-type target struct {
-	addr, fp, name string
-	ok             bool
+// offerToPhones finds phones via mDNS and announces the files to each one.
+func offerToPhones(ctx context.Context, dev *identity.Device, srv *transfer.Server, paths []string, port int) (transfer.OfferResult, error) {
+	o, err := transfer.NewOffer(paths, dev.Name, dev.ID, dev.Fingerprint, port)
+	if err != nil {
+		return transfer.OfferResult{}, err
+	}
+	srv.RegisterOffer(o.ID, paths)
+	peers, err := discovery.Browse(ctx, browseWindow, dev.ID)
+	if err != nil {
+		return transfer.OfferResult{}, err
+	}
+	res := transfer.OfferResult{ID: o.ID}
+	for _, p := range peers {
+		if p.OS != "android" {
+			continue
+		}
+		for _, a := range p.Addrs {
+			if err := transfer.SendOffer(ctx, a, p.Port, o); err == nil {
+				res.Peers = append(res.Peers, p.Name)
+				break
+			}
+		}
+	}
+	if len(res.Peers) == 0 {
+		return res, errors.New("телефон не найден: откройте OneTouch на Android (та же Wi‑Fi сеть)")
+	}
+	return res, nil
 }
 
-func peerFlags(fs *flag.FlagSet) (to, addr, fp *string) {
-	return fs.String("to", "", "имя (часть имени) или id пира"),
-		fs.String("addr", "", "адрес пира host:port (без mDNS)"),
-		fs.String("fp", "", "ожидаемый отпечаток сертификата (с --addr)")
+// cmdOffer asks the running local node to offer files (it must serve them).
+func cmdOffer(args []string) error {
+	fs := flag.NewFlagSet("offer", flag.ExitOnError)
+	files := parse(fs, args)
+	if len(files) == 0 {
+		return errors.New("укажите файл")
+	}
+	for i, f := range files {
+		abs, err := filepath.Abs(f)
+		if err != nil {
+			return err
+		}
+		files[i] = abs
+	}
+	b, _ := json.Marshal(map[string][]string{"paths": files})
+	resp, err := httpPost(fmt.Sprintf("http://127.0.0.1:%d/local/offer", controlPort), b)
+	if err != nil {
+		return fmt.Errorf("OneTouch не запущен (onetouch serve): %w", err)
+	}
+	var res struct {
+		Peers []string `json:"peers"`
+		Error string   `json:"error"`
+	}
+	json.Unmarshal(resp, &res)
+	if res.Error != "" {
+		return errors.New(res.Error)
+	}
+	fmt.Printf("✓ предложено: %s — нажмите «Получить» на телефоне\n", strings.Join(res.Peers, ", "))
+	return nil
 }
 
-// resolve finds the peer to talk to and returns a connected client.
 func resolve(ctx context.Context, dev *identity.Device, to, addr, fp string) (*transfer.Client, string, error) {
 	if addr != "" {
 		if _, _, err := net.SplitHostPort(addr); err != nil {
-			addr = net.JoinHostPort(addr, "47470")
+			addr = net.JoinHostPort(addr, strconv.Itoa(defaultPort))
 		}
 		c := transfer.NewClient(addr, fp, dev.Name)
 		info, err := c.Info(ctx)
 		if err != nil {
 			return nil, "", err
-		}
-		if fp == "" {
-			fmt.Fprintf(os.Stderr, "⚠ отпечаток не задан, доверяю при первом подключении: %s\n", c.SeenFP)
 		}
 		return c, info["name"], nil
 	}
@@ -205,15 +238,16 @@ func resolve(ctx context.Context, dev *identity.Device, to, addr, fp string) (*t
 	}
 	var match []discovery.Peer
 	for _, p := range peers {
+		if p.Fingerprint == "" {
+			continue // phones don't accept pushes; use `offer`
+		}
 		if to == "" || strings.Contains(strings.ToLower(p.Name), strings.ToLower(to)) || strings.HasPrefix(p.ID, to) {
 			match = append(match, p)
 		}
 	}
 	switch {
-	case len(match) == 0 && len(peers) == 0:
-		return nil, "", errors.New("никого не найдено в сети. Запущен ли `onetouch serve` на другом устройстве? Та же Wi‑Fi сеть? Можно указать --addr")
 	case len(match) == 0:
-		return nil, "", fmt.Errorf("нет пира %q; найдены: %s", to, names(peers))
+		return nil, "", errors.New("компьютер-получатель не найден (там должен работать OneTouch); можно указать --addr")
 	case len(match) > 1:
 		return nil, "", fmt.Errorf("найдено несколько устройств, уточните --to: %s", names(match))
 	}
@@ -254,23 +288,21 @@ func cmdPeers(args []string) error {
 	}
 	if len(peers) == 0 {
 		fmt.Println("Никого не найдено.")
-		return nil
 	}
 	for _, p := range peers {
-		fmt.Printf("• %-20s %-8s %s:%d  id=%s  fp=%s…\n", p.Name, p.OS, strings.Join(p.Addrs, ","), p.Port, p.ID, p.Fingerprint[:min(16, len(p.Fingerprint))])
+		fmt.Printf("• %-20s %-8s %s:%d  id=%s\n", p.Name, p.OS, strings.Join(p.Addrs, ","), p.Port, p.ID)
 	}
 	return nil
 }
 
-func cmdSend(args []string, mode string) error {
-	fs := flag.NewFlagSet(mode, flag.ExitOnError)
-	to, addr, fp := peerFlags(fs)
+func cmdSend(args []string) error {
+	fs := flag.NewFlagSet("send", flag.ExitOnError)
+	to := fs.String("to", "", "имя (часть имени) или id получателя")
+	addr := fs.String("addr", "", "адрес получателя host:port (без mDNS)")
+	fp := fs.String("fp", "", "ожидаемый отпечаток сертификата (с --addr)")
 	files := parse(fs, args)
 	if len(files) == 0 {
 		return errors.New("укажите файл")
-	}
-	if mode == "clip" && len(files) > 1 {
-		return errors.New("в буфер кладётся один файл")
 	}
 	dev, err := identity.Load("")
 	if err != nil {
@@ -284,109 +316,19 @@ func cmdSend(args []string, mode string) error {
 	for _, f := range files {
 		start := time.Now()
 		base := filepath.Base(f)
-		res, err := c.SendFile(ctx, f, mode, func(sent, total int64) {
+		res, err := c.SendFile(ctx, f, func(sent, total int64) {
 			pct := 100.0
 			if total > 0 {
 				pct = 100 * float64(sent) / float64(total)
 			}
-			speed := float64(sent) / time.Since(start).Seconds()
-			fmt.Fprintf(os.Stderr, "\r  %s  %5.1f%%  %s/s   ", base, pct, transfer.HumanBytes(int64(speed)))
+			fmt.Fprintf(os.Stderr, "\r  %s  %5.1f%%   ", base, pct)
 		})
 		fmt.Fprintln(os.Stderr)
 		if err != nil {
 			return fmt.Errorf("%s: %w", base, err)
 		}
-		d := time.Since(start)
-		where := "рабочий стол"
-		if res.Mode == "clip" {
-			where = "буфер"
-		}
-		fmt.Printf("✓ %s → %s (%s): %s за %s\n", base, peerName, where, transfer.HumanBytes(res.Bytes), d.Round(time.Millisecond))
+		fmt.Printf("✓ %s → %s: %s за %s\n", base, peerName, transfer.HumanBytes(res.Bytes), time.Since(start).Round(time.Millisecond))
 	}
-	return nil
-}
-
-func cmdPaste(args []string) error {
-	fs := flag.NewFlagSet("paste", flag.ExitOnError)
-	out := fs.String("out", transfer.DesktopDir(), "куда вставить")
-	from, addr, fp := peerFlags(fs)
-	fs.Lookup("to").Usage = "не используется"
-	fs.StringVar(from, "from", "", "забрать из буфера конкретного пира")
-	parse(fs, args)
-	dev, err := identity.Load("")
-	if err != nil {
-		return err
-	}
-	if *from == "" && *addr == "" {
-		if p, m, err := buffer(dev).PasteTo(*out); err == nil {
-			fmt.Printf("✓ вставлено: %s (%s, от %s)\n", p, transfer.HumanBytes(m.Size), m.From)
-			return nil
-		}
-	}
-	// Local buffer empty: pull from a peer's buffer (the pull model).
-	ctx := context.Background()
-	if *from != "" || *addr != "" {
-		c, name, err := resolve(ctx, dev, *from, *addr, *fp)
-		if err != nil {
-			return err
-		}
-		return pull(ctx, c, name, *out)
-	}
-	peers, _ := discovery.Browse(ctx, 2*time.Second, dev.ID)
-	var best *transfer.Client
-	var bestMeta transfer.ClipMeta
-	var bestName string
-	for _, p := range peers {
-		for _, a := range p.Addrs {
-			c := transfer.NewClient(net.JoinHostPort(a, strconv.Itoa(p.Port)), p.Fingerprint, dev.Name)
-			cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			m, ok, err := c.ClipMeta(cctx)
-			cancel()
-			if err != nil {
-				continue
-			}
-			if ok && (best == nil || m.Time.After(bestMeta.Time)) {
-				best, bestMeta, bestName = c, m, p.Name
-			}
-			break
-		}
-	}
-	if best == nil {
-		return errors.New("буфер пуст (ни локально, ни у пиров)")
-	}
-	return pull(ctx, best, bestName, *out)
-}
-
-func pull(ctx context.Context, c *transfer.Client, name, out string) error {
-	start := time.Now()
-	p, n, err := c.PullClip(ctx, out)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("✓ вставлено из буфера %s: %s (%s за %s)\n", name, p, transfer.HumanBytes(n), time.Since(start).Round(time.Millisecond))
-	return nil
-}
-
-func cmdCopy(args []string) error {
-	fs := flag.NewFlagSet("copy", flag.ExitOnError)
-	files := parse(fs, args)
-	if len(files) != 1 {
-		return errors.New("укажите один файл")
-	}
-	dev, err := identity.Load("")
-	if err != nil {
-		return err
-	}
-	f, err := os.Open(files[0])
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	m, err := buffer(dev).Put(f, filepath.Base(files[0]), dev.Name)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("✓ в буфере: %s (%s) — заберите с другого устройства\n", m.Name, transfer.HumanBytes(m.Size))
 	return nil
 }
 
@@ -400,4 +342,13 @@ func cmdID(args []string) error {
 	}
 	fmt.Printf("name: %s\nid:   %s\nos:   %s\nfp:   %s\ndir:  %s\n", dev.Name, dev.ID, dev.OS, dev.Fingerprint, dev.Dir)
 	return nil
+}
+
+func httpPost(url string, body []byte) ([]byte, error) {
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }

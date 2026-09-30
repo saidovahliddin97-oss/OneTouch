@@ -2,43 +2,67 @@ package transfer
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/saidovahliddin97-oss/onetouch/core/internal/identity"
 )
 
-//go:embed web/index.html
-var indexHTML []byte
-
-// Protocol (v1), served over TLS 1.3 with a self-signed, fingerprint-pinned cert:
+// Protocol (v2).
 //
-//	GET  /v1/info                         -> {"id","name","os","fp"}
-//	PUT  /v1/files?name=X&mode=save|clip&from=Y  body = raw file bytes
-//	GET  /v1/clip                         -> ClipMeta (404 if empty)
-//	GET  /v1/clip/data                    -> raw bytes of the buffered item
+// Desktop node, TLS 1.3 with a self-signed, fingerprint-pinned cert:
 //
-// The same upload endpoint is exposed on the plain-HTTP web port under
-// /web/files, guarded by a random token, for phones without the app.
+//	GET  /v1/info                        -> {"id","name","os","fp"}
+//	PUT  /v1/files?name=X&from=Y         body = raw file bytes, saved to OutDir
+//	GET  /v1/offers/{id}/{n}             n-th file of an offer made to a phone
+//
+// Phone node, plain HTTP (metadata only; the file itself is then pulled
+// from the desktop over pinned TLS):
+//
+//	POST /v1/offer                       Offer JSON -> phone shows "Получить"
+//
+// Control API for the local menu-bar app, bound to 127.0.0.1 only:
+//
+//	POST /local/offer {"paths":[...]}    offer files to phones on the LAN
+//	GET  /local/peers                    peers found via mDNS
 type Server struct {
-	Dev      *identity.Device
-	OutDir   string
-	Buffer   *Buffer
-	AutoSave bool // clips are saved straight to OutDir instead of buffered
-	Token    string
-	Notify   bool
-	Logf     func(format string, a ...any)
+	Dev    *identity.Device
+	OutDir string
+	Notify bool        // OS notification per received file (CLI use)
+	Events func(Event) // structured events for the menu-bar app
+	Offer  func([]string) (OfferResult, error)
+	Peers  func() any
+	Logf   func(format string, a ...any)
+
+	mu     sync.Mutex
+	offers map[string]*offer
+}
+
+// Event is emitted as one JSON line on stdout with `serve --events`.
+type Event struct {
+	Type  string   `json:"type"` // received | offered | error
+	Path  string   `json:"path,omitempty"`
+	Name  string   `json:"name,omitempty"`
+	From  string   `json:"from,omitempty"`
+	Bytes int64    `json:"bytes,omitempty"`
+	Peers []string `json:"peers,omitempty"`
+	Error string   `json:"error,omitempty"`
+}
+
+type offer struct {
+	paths   []string
+	expires time.Time
 }
 
 func (s *Server) logf(f string, a ...any) {
@@ -49,53 +73,66 @@ func (s *Server) logf(f string, a ...any) {
 	}
 }
 
+func (s *Server) emit(e Event) {
+	if s.Events != nil {
+		s.Events(e)
+	}
+}
+
+// RegisterOffer makes paths downloadable at /v1/offers/{id}/{n} for 15 min.
+func (s *Server) RegisterOffer(id string, paths []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.offers == nil {
+		s.offers = map[string]*offer{}
+	}
+	now := time.Now()
+	for k, o := range s.offers {
+		if now.After(o.expires) {
+			delete(s.offers, k)
+		}
+	}
+	s.offers[id] = &offer{paths: paths, expires: now.Add(15 * time.Minute)}
+}
+
 func (s *Server) apiMux() *http.ServeMux {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /v1/info", s.handleInfo)
 	m.HandleFunc("PUT /v1/files", s.handleUpload)
 	m.HandleFunc("POST /v1/files", s.handleUpload)
-	m.HandleFunc("GET /v1/clip", s.handleClipMeta)
-	m.HandleFunc("GET /v1/clip/data", s.handleClipData)
+	m.HandleFunc("GET /v1/offers/{id}/{n}", s.handleOfferData)
 	return m
 }
 
-func (s *Server) webMux() *http.ServeMux {
+func (s *Server) localMux() *http.ServeMux {
 	m := http.NewServeMux()
-	m.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		if !s.tokenOK(r) {
-			http.Error(w, "OneTouch: scan the QR code shown by `onetouch serve`", http.StatusForbidden)
+	m.HandleFunc("POST /local/offer", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Paths []string `json:"paths"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Paths) == 0 {
+			http.Error(w, "paths required", 400)
 			return
 		}
-		http.SetCookie(w, &http.Cookie{Name: "ot", Value: s.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 30 * 24 * 3600})
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write(indexHTML)
+		if s.Offer == nil {
+			http.Error(w, "offers disabled", 501)
+			return
+		}
+		res, err := s.Offer(req.Paths)
+		if err != nil {
+			writeJSON(w, 502, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, res)
 	})
-	guard := func(h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			if !s.tokenOK(r) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			h(w, r)
+	m.HandleFunc("GET /local/peers", func(w http.ResponseWriter, r *http.Request) {
+		if s.Peers == nil {
+			writeJSON(w, 200, []any{})
+			return
 		}
-	}
-	m.HandleFunc("GET /web/info", guard(s.handleInfo))
-	m.HandleFunc("PUT /web/files", guard(s.handleUpload))
-	m.HandleFunc("POST /web/files", guard(s.handleUpload))
-	m.HandleFunc("GET /web/clip", guard(s.handleClipMeta))
-	m.HandleFunc("GET /web/clip/data", guard(s.handleClipData))
+		writeJSON(w, 200, s.Peers())
+	})
 	return m
-}
-
-func (s *Server) tokenOK(r *http.Request) bool {
-	t := r.URL.Query().Get("t")
-	if t == "" {
-		if c, err := r.Cookie("ot"); err == nil {
-			t = c.Value
-		}
-	}
-	return s.Token != "" && subtle.ConstantTimeCompare([]byte(t), []byte(s.Token)) == 1
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -109,7 +146,6 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 type UploadResult struct {
-	Mode  string `json:"mode"`
 	Name  string `json:"name"`
 	Path  string `json:"path,omitempty"`
 	Bytes int64  `json:"bytes"`
@@ -118,86 +154,75 @@ type UploadResult struct {
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	name := SafeName(q.Get("name"))
-	mode := q.Get("mode")
 	from := q.Get("from")
 	if from == "" {
 		from = r.RemoteAddr
 	}
 	start := time.Now()
-	var res UploadResult
-	if mode == "clip" && !s.AutoSave {
-		m, err := s.Buffer.Put(r.Body, name, from)
-		if err != nil {
-			s.logf("clip from %s failed: %v", from, err)
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		res = UploadResult{Mode: "clip", Name: m.Name, Bytes: m.Size}
-		s.logf("📋 %s → buffer: %s (%s, %s)", from, m.Name, HumanBytes(m.Size), rate(m.Size, start))
-		s.notify("OneTouch: в буфере", fmt.Sprintf("%s от %s — вставьте хоткеем/жестом", m.Name, from))
-	} else {
-		p, n, err := writeAtomic(s.OutDir, name, r.Body)
-		if err != nil {
-			s.logf("file from %s failed: %v", from, err)
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		res = UploadResult{Mode: "save", Name: name, Path: p, Bytes: n}
-		s.logf("📥 %s → %s (%s, %s)", from, p, HumanBytes(n), rate(n, start))
-		s.notify("OneTouch: файл получен", fmt.Sprintf("%s от %s", name, from))
-	}
-	writeJSON(w, 200, res)
-}
-
-func (s *Server) handleClipMeta(w http.ResponseWriter, r *http.Request) {
-	m, ok := s.Buffer.Get()
-	if !ok {
-		writeJSON(w, 404, map[string]string{"error": "buffer empty"})
+	p, n, err := writeAtomic(s.OutDir, name, r.Body)
+	if err != nil {
+		s.logf("file from %s failed: %v", from, err)
+		s.emit(Event{Type: "error", Name: name, From: from, Error: err.Error()})
+		http.Error(w, err.Error(), 500)
 		return
 	}
-	writeJSON(w, 200, m)
+	s.logf("📥 %s → %s (%s, %s)", from, p, HumanBytes(n), rate(n, start))
+	s.emit(Event{Type: "received", Path: p, Name: name, From: from, Bytes: n})
+	s.notify("OneTouch: файл получен", fmt.Sprintf("%s от %s", name, from))
+	writeJSON(w, 200, UploadResult{Name: name, Path: p, Bytes: n})
 }
 
-func (s *Server) handleClipData(w http.ResponseWriter, r *http.Request) {
-	f, m, err := s.Buffer.Open()
+func (s *Server) handleOfferData(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.Atoi(r.PathValue("n"))
+	s.mu.Lock()
+	o := s.offers[r.PathValue("id")]
+	s.mu.Unlock()
+	if err != nil || o == nil || time.Now().After(o.expires) || n < 0 || n >= len(o.paths) {
+		http.Error(w, "offer expired", 404)
+		return
+	}
+	f, err := os.Open(o.paths[n])
 	if err != nil {
-		http.Error(w, "buffer empty", 404)
+		http.Error(w, "file gone", 410)
 		return
 	}
 	defer f.Close()
-	w.Header().Set("X-OneTouch-Name", m.Name)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", m.Name))
-	http.ServeContent(w, r, m.Name, m.Time, f)
+	st, _ := f.Stat()
+	name := SafeName(st.Name())
+	w.Header().Set("X-OneTouch-Name", name)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeContent(w, r, name, st.ModTime(), f)
+	s.logf("📤 %s → %s", name, r.RemoteAddr)
 }
 
-// Run serves the TLS API on apiPort and the web UI on webPort until ctx ends.
-func (s *Server) Run(ctx context.Context, apiLn, webLn net.Listener) error {
+// Run serves the TLS API and the loopback control API until ctx ends.
+func (s *Server) Run(ctx context.Context, apiLn, localLn net.Listener) error {
 	api := &http.Server{
 		Handler:           s.apiMux(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second, // drop idle keep-alives: nothing runs while idle
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{s.Dev.Cert},
-			MinVersion:   tls.VersionTLS13,
+			MinVersion:   tls.VersionTLS12, // Android 9 and older lack TLS 1.3 in HttpsURLConnection
 		},
 	}
-	web := &http.Server{Handler: s.webMux(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	local := &http.Server{Handler: s.localMux(), ReadHeaderTimeout: 5 * time.Second}
 	errc := make(chan error, 2)
 	go func() { errc <- api.ServeTLS(apiLn, "", "") }()
-	go func() { errc <- web.Serve(webLn) }()
+	go func() { errc <- local.Serve(localLn) }()
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
 		if !errors.Is(err, http.ErrServerClosed) {
 			api.Close()
-			web.Close()
+			local.Close()
 			return err
 		}
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	api.Shutdown(sctx)
-	web.Shutdown(sctx)
+	local.Shutdown(sctx)
 	return nil
 }
 

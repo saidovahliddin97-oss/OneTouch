@@ -89,8 +89,8 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// SendFile streams a local file to the peer. mode is "save" or "clip".
-func (c *Client) SendFile(ctx context.Context, path, mode string, progress func(sent, total int64)) (UploadResult, error) {
+// SendFile streams a local file to the peer.
+func (c *Client) SendFile(ctx context.Context, path string, progress func(sent, total int64)) (UploadResult, error) {
 	var res UploadResult
 	f, err := os.Open(path)
 	if err != nil {
@@ -105,7 +105,7 @@ func (c *Client) SendFile(ctx context.Context, path, mode string, progress func(
 		return res, fmt.Errorf("%s is a directory (folders are not supported yet)", path)
 	}
 	body := &progressReader{r: f, total: st.Size(), fn: progress}
-	q := url.Values{"name": {filepath.Base(path)}, "mode": {mode}, "from": {c.From}}
+	q := url.Values{"name": {filepath.Base(path)}, "from": {c.From}}
 	req, _ := http.NewRequestWithContext(ctx, "PUT", c.url("/v1/files", q), body)
 	req.ContentLength = st.Size()
 	req.Header.Set("Content-Type", "application/octet-stream")
@@ -119,35 +119,4 @@ func (c *Client) SendFile(ctx context.Context, path, mode string, progress func(
 		return res, fmt.Errorf("peer returned %s: %s", resp.Status, b)
 	}
 	return res, json.NewDecoder(resp.Body).Decode(&res)
-}
-
-// ClipMeta asks the peer what is in its buffer. ok=false when it is empty.
-func (c *Client) ClipMeta(ctx context.Context) (m ClipMeta, ok bool, err error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/v1/clip", nil), nil)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return m, false, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 404 {
-		return m, false, nil
-	}
-	if resp.StatusCode != 200 {
-		return m, false, fmt.Errorf("peer returned %s", resp.Status)
-	}
-	return m, true, json.NewDecoder(resp.Body).Decode(&m)
-}
-
-// PullClip downloads the peer's buffered item into dir.
-func (c *Client) PullClip(ctx context.Context, dir string) (string, int64, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/v1/clip/data", nil), nil)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", 0, fmt.Errorf("peer returned %s", resp.Status)
-	}
-	return writeAtomic(dir, SafeName(resp.Header.Get("X-OneTouch-Name")), resp.Body)
 }

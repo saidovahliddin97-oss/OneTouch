@@ -25,7 +25,6 @@ type Peer struct {
 	OS          string   `json:"os"`
 	Fingerprint string   `json:"fp"`
 	Port        int      `json:"port"`
-	WebPort     int      `json:"web_port"`
 	Addrs       []string `json:"addrs"`
 }
 
@@ -39,7 +38,7 @@ func (p Peer) Addr() string {
 
 type Announcement struct {
 	ID, Name, OS, Fingerprint string
-	Port, WebPort             int
+	Port                      int
 }
 
 // Announce registers the service. Call Shutdown on the result to withdraw it.
@@ -50,7 +49,6 @@ func Announce(a Announcement) (*zeroconf.Server, error) {
 		"name=" + a.Name,
 		"os=" + a.OS,
 		"fp=" + a.Fingerprint,
-		"web=" + strconv.Itoa(a.WebPort),
 	}
 	instance := a.Name + "-" + a.ID[:6]
 	return zeroconf.Register(instance, Service, Domain, a.Port, txt, nil)
@@ -107,8 +105,6 @@ func fromEntry(e *zeroconf.ServiceEntry) Peer {
 			p.OS = v
 		case "fp":
 			p.Fingerprint = v
-		case "web":
-			p.WebPort, _ = strconv.Atoi(v)
 		}
 	}
 	var addrs []string
