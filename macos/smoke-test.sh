@@ -37,6 +37,7 @@ PHONE_PID="$PHONE_PID $!"
 sleep 4
 echo "--- system Bonjour sees:"; (dns-sd -B _onetouch._tcp local & P=$!; sleep 3; kill $P) || true
 grep -q "published" "$T/app.log" && echo "✓ app announced the Mac via system Bonjour (phone can find it)"
+echo "--- CLI NetService probe:"; swiftc -O resolve-probe.swift -o "$T/probe" 2>/dev/null && "$T/probe" || true
 echo "--- Go core (CLI) sees:"; "$T/onetouch" peers | tee "$T/peers.txt" || true
 grep -q "Pixel.*android" "$T/peers.txt" && echo "✓ mDNS: the core's discovery finds a phone announced by the system responder"
 for i in $(seq 1 40); do grep -q "phone found: Pixel" "$T/app.log" && break; sleep 1; done
