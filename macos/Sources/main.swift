@@ -185,7 +185,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func offer(_ paths: [String], reason: String, retry: Bool = true) {
         logLine("offering \(paths.joined(separator: ", ")) (\(reason)) to \(phones.phones.count) phone(s)")
-        daemon.offer(paths, to: Array(phones.phones.values)) { [weak self] result in
+        var targets = Array(phones.phones.values)
+        // Test hook: ONETOUCH_EXTRA_PHONE=host:port adds a phone that Bonjour may not
+        // see (CI machines cannot grant the Local Network permission).
+        if let extra = ProcessInfo.processInfo.environment["ONETOUCH_EXTRA_PHONE"],
+           let colon = extra.lastIndex(of: ":"), let port = Int(extra[extra.index(after: colon)...]) {
+            targets.append(PhoneBrowser.Phone(name: "test-phone", host: String(extra[..<colon]), port: port))
+        }
+        daemon.offer(paths, to: targets) { [weak self] result in
             let what = paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) файлов"
             switch result {
             case .success(let phones):

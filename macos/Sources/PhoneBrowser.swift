@@ -30,7 +30,13 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
         start()
     }
 
+    func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
+        // -65570 (PolicyDenied) = the user has not allowed Local Network access.
+        logLine("bonjour browse failed: \(errorDict)")
+    }
+
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        logLine("bonjour found: \(service.name)")
         resolving.append(service)
         service.delegate = self
         service.resolve(withTimeout: 5)
@@ -45,6 +51,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     func netServiceDidResolveAddress(_ service: NetService) {
         guard let data = service.txtRecordData() else { return }
         let txt = NetService.dictionary(fromTXTRecord: data).mapValues { String(decoding: $0, as: UTF8.self) }
+        logLine("resolved \(service.name): txt=\(txt) addrs=\(service.addresses?.count ?? 0)")
         guard txt["os"] == "android", let host = Self.address(service.addresses ?? []) else { return }
         phones[service.name] = Phone(name: txt["name"] ?? service.name, host: host, port: service.port)
         logLine("phone found: \(service.name) at \(host):\(service.port)")
@@ -52,6 +59,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     }
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        logLine("bonjour resolve failed: \(sender.name) \(errorDict)")
         resolving.removeAll { $0 == sender }
     }
 

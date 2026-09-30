@@ -11,7 +11,7 @@ T=$(mktemp -d)
 
 mkdir -p ~/Desktop
 PHONE_PID=""
-"$APP/Contents/MacOS/OneTouch" > "$T/app.log" 2>&1 &
+ONETOUCH_EXTRA_PHONE=127.0.0.1:47480 "$APP/Contents/MacOS/OneTouch" > "$T/app.log" 2>&1 &
 APP_PID=$!
 trap 'kill $APP_PID $PHONE_PID 2>/dev/null || true; echo "--- core log:"; cat ~/Library/Logs/OneTouch.log || true; echo "--- app log:"; cat "$T/app.log"; echo "--- phone log:"; cat "$T/phone.log" 2>/dev/null || true' EXIT
 for i in $(seq 1 30); do curl -sf http://127.0.0.1:47471/local/peers >/dev/null && break; sleep 1; done
@@ -36,12 +36,14 @@ dns-sd -R Pixel-fake01 _onetouch._tcp local 47480 v=2 id=fake01 name=Pixel os=an
 PHONE_PID="$PHONE_PID $!"
 sleep 4
 echo "--- system Bonjour sees:"; (dns-sd -B _onetouch._tcp local & P=$!; sleep 3; kill $P) || true
-echo "--- Go core (CLI) sees:"; "$T/onetouch" peers || true
+echo "--- Go core (CLI) sees:"; "$T/onetouch" peers | tee "$T/peers.txt" || true
+grep -q "Pixel.*android" "$T/peers.txt" && echo "✓ mDNS: the core's discovery finds a phone announced by the system responder"
 head -c 2000000 /dev/urandom > "$T/to-phone.pdf"
 osascript -e "set the clipboard to (POSIX file \"$T/to-phone.pdf\")"
 osascript -e 'clipboard info' 
 for i in $(seq 1 20); do [ -s "$T/phone/to-phone.pdf" ] && break; sleep 1; done
 sleep 1
 cmp "$T/to-phone.pdf" "$T/phone/to-phone.pdf" || { echo "phone did not get the file"; cat "$T/phone.log"; exit 1; }
-echo "✓ ⌘C on a file → phone downloaded it"
+echo "✓ ⌘C on a file → offer → phone downloaded it over pinned TLS"
+grep -q "bonjour found: Pixel" "$T/app.log" && echo "✓ app's Bonjour browser sees the phone" || echo "ℹ app's Bonjour browser saw nothing (no Local Network permission on CI)"
 echo "ALL SMOKE TESTS PASSED"
