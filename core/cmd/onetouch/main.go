@@ -134,8 +134,10 @@ func cmdServe(args []string) error {
 	srv.Offer = func(paths []string) (transfer.OfferResult, error) {
 		res, err := offerToPhones(context.Background(), dev, srv, paths, *port)
 		if err != nil {
+			logf("offer %v failed: %v", paths, err)
 			emit(transfer.Event{Type: "error", Error: err.Error()})
 		} else {
+			logf("📨 offered %d file(s) to %s", len(paths), strings.Join(res.Peers, ", "))
 			emit(transfer.Event{Type: "offered", Name: filepath.Base(paths[0]), Peers: res.Peers})
 		}
 		return res, err
@@ -172,16 +174,20 @@ func offerToPhones(ctx context.Context, dev *identity.Device, srv *transfer.Serv
 		return transfer.OfferResult{}, err
 	}
 	res := transfer.OfferResult{ID: o.ID}
+	var lastErr error
 	for _, p := range peers {
 		if p.OS != "android" {
 			continue
 		}
 		for _, a := range p.Addrs {
-			if err := transfer.SendOffer(ctx, a, p.Port, o); err == nil {
+			if lastErr = transfer.SendOffer(ctx, a, p.Port, o); lastErr == nil {
 				res.Peers = append(res.Peers, p.Name)
 				break
 			}
 		}
+	}
+	if len(res.Peers) == 0 && lastErr != nil {
+		return res, fmt.Errorf("телефон найден, но не отвечает: %w", lastErr)
 	}
 	if len(res.Peers) == 0 {
 		return res, errors.New("телефон не найден: откройте OneTouch на Android (та же Wi‑Fi сеть)")

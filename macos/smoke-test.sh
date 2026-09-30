@@ -13,7 +13,7 @@ mkdir -p ~/Desktop
 PHONE_PID=""
 "$APP/Contents/MacOS/OneTouch" > "$T/app.log" 2>&1 &
 APP_PID=$!
-trap 'kill $APP_PID $PHONE_PID 2>/dev/null || true; echo "--- core log:"; cat ~/Library/Logs/OneTouch.log || true' EXIT
+trap 'kill $APP_PID $PHONE_PID 2>/dev/null || true; echo "--- core log:"; cat ~/Library/Logs/OneTouch.log || true; echo "--- app log:"; cat "$T/app.log"; echo "--- phone log:"; cat "$T/phone.log" 2>/dev/null || true' EXIT
 for i in $(seq 1 30); do curl -sf http://127.0.0.1:47471/local/peers >/dev/null && break; sleep 1; done
 curl -sf http://127.0.0.1:47471/local/peers >/dev/null || { echo "core did not start"; cat "$T/app.log"; exit 1; }
 echo "✓ app started the core"

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/grandcat/zeroconf"
 )
@@ -50,8 +51,25 @@ func Announce(a Announcement) (*zeroconf.Server, error) {
 		"os=" + a.OS,
 		"fp=" + a.Fingerprint,
 	}
-	instance := a.Name + "-" + a.ID[:6]
+	instance := InstanceName(a.Name, a.ID)
 	return zeroconf.Register(instance, Service, Domain, a.Port, txt, nil)
+}
+
+// InstanceName builds the DNS-SD instance label "<name>-<id6>", which must
+// fit in 63 bytes (RFC 6763) and must not contain dots: long or dotted
+// computer names otherwise make every announcement fail ("bad rdata").
+func InstanceName(name, id string) string {
+	suffix := "-" + id[:min(6, len(id))]
+	name = strings.ReplaceAll(name, ".", "-")
+	max := 63 - len(suffix)
+	if len(name) > max {
+		cut := max
+		for cut > 0 && !utf8.RuneStart(name[cut]) {
+			cut--
+		}
+		name = strings.TrimRight(name[:cut], " -")
+	}
+	return name + suffix
 }
 
 // Browse queries the network for `timeout` and returns all peers except selfID.

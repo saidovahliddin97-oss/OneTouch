@@ -27,7 +27,7 @@ class Discovery(private val ctx: Context) {
     fun register(port: Int, id: String, name: String) {
         unregister()
         val info = NsdServiceInfo().apply {
-            serviceName = "$name-${id.take(6)}"
+            serviceName = instanceName(name, id)
             serviceType = SERVICE_TYPE
             setPort(port)
             setAttribute("v", "2")
@@ -81,6 +81,14 @@ class Discovery(private val ctx: Context) {
             lock.release()
         }
         return peers
+    }
+
+    /** DNS-SD instance label: at most 63 UTF-8 bytes, no dots. */
+    private fun instanceName(name: String, id: String): String {
+        val suffix = "-" + id.take(6)
+        var base = name.replace('.', '-')
+        while (base.toByteArray().size > 63 - suffix.length) base = base.dropLast(1)
+        return base.trimEnd(' ', '-') + suffix
     }
 
     @Suppress("DEPRECATION") // resolveService works on all versions we support

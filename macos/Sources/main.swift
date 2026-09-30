@@ -181,12 +181,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     // MARK: - Transfers
 
     private func offer(_ paths: [String], reason: String) {
+        NSLog("OneTouch: offering %@ (%@)", paths.joined(separator: ", "), reason)
         daemon.offer(paths) { [weak self] result in
             let what = paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) файлов"
             switch result {
             case .success(let phones):
                 self?.notify("\(what) → \(phones.joined(separator: ", "))", "Нажмите «Получить» на телефоне")
             case .failure(let e):
+                NSLog("OneTouch: offer failed: %@", e.message)
                 // Silent for ⌘C: copying files is common and the phone may simply be away.
                 if reason != "⌘C" { self?.notify("Не отправлено", e.message) }
             }
