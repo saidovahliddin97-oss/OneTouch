@@ -31,15 +31,17 @@ final class ClipboardWatcher {
     private func tick() {
         let pb = NSPasteboard.general
         guard pb.changeCount != lastCount else { return }
+        // A copy is clearContents() followed by a write. If we land in between,
+        // the pasteboard is empty: don't mark this change as seen, look again.
+        guard let types = pb.types, !types.isEmpty else { return }
         lastCount = pb.changeCount
-        logLine("clipboard changed: \((pb.types ?? []).map(\.rawValue).joined(separator: ", "))")
+        logLine("clipboard changed: \(types.map(\.rawValue).joined(separator: ", "))")
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
             let files = urls.filter { !$0.hasDirectoryPath }
             if !files.isEmpty { onFiles?(files) }
             return
         }
         // A screenshot copied with ⌃⇧⌘4: image data only, no text.
-        let types = pb.types ?? []
         guard !types.contains(.string), types.contains(.png) || types.contains(.tiff) else { return }
         guard let img = NSImage(pasteboard: pb), let png = img.pngData() else { return }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("OneTouch", isDirectory: true)
