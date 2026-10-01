@@ -146,6 +146,39 @@ extension Daemon {
     }
 }
 
+extension Daemon {
+    /// Pushes files to another computer (its Desktop) over pinned TLS.
+    func send(_ paths: [String], to d: PhoneBrowser.Phone, completion: @escaping (String?) -> Void) {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:47471/local/send")!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 600
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "paths": paths, "target": ["name": d.name, "host": d.host, "port": d.port, "fp": d.fp],
+        ])
+        URLSession.shared.dataTask(with: req) { data, resp, error in
+            var err: String?
+            if let error { err = error.localizedDescription }
+            else if (resp as? HTTPURLResponse)?.statusCode != 200 {
+                err = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["error"] as? String ?? "ошибка"
+            }
+            DispatchQueue.main.async { completion(err) }
+        }.resume()
+    }
+
+    /// Asks a phone to upload its newest photo/video to this Mac.
+    static func pullLatest(from phone: PhoneBrowser.Phone, me: [String: Any], completion: @escaping (String?) -> Void) {
+        var req = URLRequest(url: URL(string: "http://\(phone.host.contains(":") ? "[\(phone.host)]" : phone.host):\(phone.port)/v1/pull")!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 5
+        req.httpBody = try? JSONSerialization.data(withJSONObject: me)
+        URLSession.shared.dataTask(with: req) { _, resp, error in
+            let err = error?.localizedDescription ?? ((resp as? HTTPURLResponse)?.statusCode == 200 ? nil : "телефон не ответил")
+            DispatchQueue.main.async { completion(err) }
+        }.resume()
+    }
+}
+
 struct OfferError: Error {
     let message: String
 }

@@ -42,6 +42,31 @@ final class InputInjector {
             let p = point(e)
             mouse(.rightMouseDown, p, .right)
             mouse(.rightMouseUp, p, .right)
+        // Touchpad mode: the phone moves the cursor relatively and clicks where it is.
+        case "rel":
+            let b = CGDisplayBounds(CGMainDisplayID())
+            let cur = CGEvent(source: nil)?.location ?? CGPoint(x: b.midX, y: b.midY)
+            let p = CGPoint(x: min(max(cur.x + CGFloat(e["dx"] as? Double ?? 0), b.minX), b.maxX - 1),
+                            y: min(max(cur.y + CGFloat(e["dy"] as? Double ?? 0), b.minY), b.maxY - 1))
+            mouse(buttonDown ? .leftMouseDragged : .mouseMoved, p, .left)
+        case "clickHere", "downHere", "upHere", "rightHere":
+            let p = CGEvent(source: nil)?.location ?? .zero
+            if t == "rightHere" {
+                mouse(.rightMouseDown, p, .right)
+                mouse(.rightMouseUp, p, .right)
+                return
+            }
+            if t != "upHere" {
+                let now = Date()
+                clickCount = now.timeIntervalSince(lastClick) < 0.4 ? min(clickCount + 1, 3) : 1
+                lastClick = now
+                buttonDown = true
+                mouse(.leftMouseDown, p, .left, clicks: clickCount)
+            }
+            if t != "downHere" {
+                buttonDown = false
+                mouse(.leftMouseUp, p, .left, clicks: clickCount)
+            }
         case "scroll":
             let dx = Int32(e["dx"] as? Double ?? 0)
             let dy = Int32(e["dy"] as? Double ?? 0)
@@ -108,6 +133,11 @@ final class InputInjector {
 
 extension Double {
     func clamped(_ lo: Double, _ hi: Double) -> Double { Swift.min(hi, Swift.max(lo, self)) }
+}
+
+extension CGFloat {
+    var clampedUnit: CGFloat { Swift.min(1, Swift.max(0, self)) }
+    func clampedTo(_ lo: CGFloat, _ hi: CGFloat) -> CGFloat { Swift.min(hi, Swift.max(lo, self)) }
 }
 
 /// The phone watches (and controls) this Mac.
@@ -191,7 +221,7 @@ final class ScreenSession {
                 if InputInjector.allowed { self.input.handle(obj) }
                 if ProcessInfo.processInfo.environment["ONETOUCH_FAKE_SCREEN"] != nil { logLine("input \(obj)") }
             case .command:
-                self.command(obj["cmd"] as? String ?? "")
+                self.command(obj["cmd"] as? String ?? "", obj)
             default:
                 break
             }
@@ -199,10 +229,12 @@ final class ScreenSession {
         }
     }
 
-    private func command(_ cmd: String) {
+    private func command(_ cmd: String, _ obj: [String: Any]) {
         switch cmd {
         case "keyframe":
             encoder.requestKeyframe()
+        case "quality":
+            encoder.setBitrate(obj["bitrate"] as? Int ?? 8_000_000)
         case "grab":
             DispatchQueue.main.async {
                 let paths = self.selection?() ?? []
@@ -262,7 +294,52 @@ final class MirrorSession: NSObject, NSWindowDelegate {
     func start() {
         fc.onClose = { [weak self] in DispatchQueue.main.async { self?.stop() } }
         view.onDrop = { [weak self] urls in self?.offer(urls.map(\.path)) }
+        view.onInput = { [weak self] obj in self?.send(.input, obj) }
         readLoop()
+    }
+
+    /// Sends an input event or a command to the phone.
+    func send(_ kind: FrameConn.Kind, _ obj: [String: Any]) {
+        fc.queue.async { self.fc.sendJSON(kind, obj) }
+    }
+
+    @objc private func toolbarAction(_ sender: NSButton) {
+        switch sender.tag {
+        case 1: send(.input, ["t": "key", "k": "back"])
+        case 2: send(.input, ["t": "key", "k": "home"])
+        case 3: send(.input, ["t": "key", "k": "recents"])
+        case 4: send(.input, ["t": "key", "k": "notifications"])
+        case 5:
+            send(.command, ["cmd": "screenshot"])
+            view.flash("Снимок экрана телефона → рабочий стол")
+        case 6:
+            send(.command, ["cmd": "pick"])
+            view.flash("Выберите файл на экране телефона — он придёт на Mac")
+        default: break
+        }
+    }
+
+    private func makeToolbar() -> NSView {
+        let items: [(String, String, Int)] = [
+            ("chevron.backward", "Назад", 1), ("circle", "Домой", 2), ("square.on.square", "Недавние", 3),
+            ("bell", "Уведомления", 4), ("camera.viewfinder", "Снимок → Mac", 5), ("square.and.arrow.down", "Файл с телефона", 6),
+        ]
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 2
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        for (symbol, title, tag) in items {
+            let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: title) ?? NSImage(), target: self,
+                             action: #selector(toolbarAction(_:)))
+            b.tag = tag
+            b.bezelStyle = .texturedRounded
+            b.isBordered = false
+            b.toolTip = title
+            b.contentTintColor = .labelColor
+            b.widthAnchor.constraint(equalToConstant: 30).isActive = true
+            stack.addArrangedSubview(b)
+        }
+        return stack
     }
 
     private func readLoop() {
@@ -283,6 +360,9 @@ final class MirrorSession: NSObject, NSWindowDelegate {
                     self.framesShown += 1
                     if self.framesShown == 30 { logLine("mirror \(self.peer.name): 30 frames decoded, layer=\(self.view.statusText)") }
                 }
+            case .status:
+                let obj = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any] ?? [:]
+                if let text = obj["text"] as? String { DispatchQueue.main.async { self.view.flash(text, seconds: 5) } }
             default:
                 break
             }
@@ -306,11 +386,17 @@ final class MirrorSession: NSObject, NSWindowDelegate {
         win.backgroundColor = .black
         win.contentAspectRatio = NSSize(width: w, height: h)
         win.contentView = view
+        view.videoSize = CGSize(width: w, height: h)
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = makeToolbar()
+        accessory.layoutAttribute = .trailing
+        win.addTitlebarAccessoryViewController(accessory)
         win.delegate = self
         win.isReleasedWhenClosed = false
         win.center()
         NSApp.activate(ignoringOtherApps: true)
         win.makeKeyAndOrderFront(nil)
+        win.makeFirstResponder(view)
         window = win
     }
 
@@ -394,6 +480,14 @@ final class MirrorView: NSView {
     private let videoLayer = AVSampleBufferDisplayLayer()
     private let label = NSTextField(labelWithString: "Перетащите файл сюда — он появится на телефоне")
     var onDrop: (([URL]) -> Void)?
+    /// Touch / key events for the phone, coordinates normalized to the video.
+    var onInput: (([String: Any]) -> Void)?
+    var videoSize = CGSize(width: 9, height: 16)
+    private var downPoint: CGPoint?
+    private var downTime = Date()
+    private var lastDrag: CGPoint?
+    private var scrollAccum: CGFloat = 0
+    private var scrollTimer: Timer?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -436,11 +530,95 @@ final class MirrorView: NSView {
         videoLayer.enqueue(sb)
     }
 
-    func flash(_ text: String) {
+    // MARK: Mouse & keyboard → phone
+
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    private var videoRect: CGRect { AVMakeRect(aspectRatio: videoSize, insideRect: bounds) }
+
+    private func normalized(_ event: NSEvent) -> CGPoint {
+        let p = convert(event.locationInWindow, from: nil)
+        let r = videoRect
+        let x = ((p.x - r.minX) / max(r.width, 1)).clampedUnit
+        let y = (1 - (p.y - r.minY) / max(r.height, 1)).clampedUnit // AppKit's y grows upwards
+        return CGPoint(x: x, y: y)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        downPoint = normalized(event)
+        lastDrag = downPoint
+        downTime = Date()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        lastDrag = normalized(event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let a = downPoint else { return }
+        let b = normalized(event)
+        downPoint = nil
+        let held = Date().timeIntervalSince(downTime)
+        let moved = hypot((b.x - a.x) * videoRect.width, (b.y - a.y) * videoRect.height)
+        if moved < 6 {
+            if event.clickCount == 2 {
+                onInput?(["t": "tap", "x": a.x, "y": a.y]) // the first tap was already sent
+            } else if held > 0.5 {
+                onInput?(["t": "long", "x": a.x, "y": a.y])
+            } else {
+                onInput?(["t": "tap", "x": a.x, "y": a.y])
+            }
+        } else {
+            let ms = Int(min(max(held, 0.08), 2.0) * 1000)
+            onInput?(["t": "swipe", "x1": a.x, "y1": a.y, "x2": b.x, "y2": b.y, "ms": ms])
+        }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onInput?(["t": "key", "k": "back"])
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 12
+        scrollAccum += dy
+        scrollTimer?.invalidate()
+        scrollTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self] _ in self?.flushScroll() }
+    }
+
+    private func flushScroll() {
+        let r = videoRect
+        guard r.height > 0, abs(scrollAccum) > 2 else { scrollAccum = 0; return }
+        // Natural scrolling: content follows the fingers, so a swipe in the same direction.
+        let delta = (scrollAccum / r.height * 1.6).clampedTo(-0.7, 0.7)
+        let y1 = 0.5 - delta / 2, y2 = 0.5 + delta / 2
+        onInput?(["t": "swipe", "x1": 0.5, "y1": y1, "x2": 0.5, "y2": y2, "ms": 220])
+        scrollAccum = 0
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 51: onInput?(["t": "key", "k": "backspace"])
+        case 36, 76: onInput?(["t": "key", "k": "enter"])
+        case 53: onInput?(["t": "key", "k": "back"])
+        default:
+            if event.modifierFlags.contains(.command) {
+                if event.charactersIgnoringModifiers == "v", let s = NSPasteboard.general.string(forType: .string) {
+                    onInput?(["t": "text", "s": s]) // paste Mac clipboard text into the phone
+                } else {
+                    super.keyDown(with: event)
+                }
+            } else if let s = event.characters, !s.isEmpty, s.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value != 127 }) {
+                onInput?(["t": "text", "s": s])
+            }
+        }
+    }
+
+    func flash(_ text: String, seconds: Double = 2) {
         label.stringValue = text
         label.alphaValue = 1
         needsLayout = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
             NSAnimationContext.runAnimationGroup { $0.duration = 0.6; self?.label.animator().alphaValue = 0 }
         }
     }

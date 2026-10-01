@@ -5,14 +5,22 @@ import Foundation
 /// cannot browse reliably itself; it gets the phone addresses from here.
 /// Browsing is cheap: mDNSResponder caches and backs off on its own.
 final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+    /// Any OneTouch device: a phone (os=android) or a computer (has a TLS fingerprint).
     struct Phone {
         let name: String
         let host: String
         let port: Int
+        var id = ""
+        var os = "android"
+        var fp = ""
+        var isPhone: Bool { os == "android" }
     }
 
     var onChange: (() -> Void)?
-    private(set) var phones: [String: Phone] = [:]   // keyed by service instance name
+    private(set) var devices: [String: Phone] = [:]  // keyed by service instance name
+    var phones: [String: Phone] { devices.filter { $0.value.isPhone } }
+    var computers: [String: Phone] { devices.filter { !$0.value.isPhone && !$0.value.fp.isEmpty } }
+    private var selfID = ""
     private var browser = NetServiceBrowser()
     private var resolving: [NetService] = []           // NetService must be retained while resolving
     private var attempts: [String: Int] = [:]
@@ -24,6 +32,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     /// Announces this Mac (the core's TLS port and certificate fingerprint).
     func publish(name: String, id: String, fp: String, port: Int) {
         published?.stop()
+        selfID = id
         let suffix = "-" + id.prefix(6)
         var base = name.replacingOccurrences(of: ".", with: "-")
         while base.utf8.count > 63 - suffix.utf8.count { base.removeLast() }
@@ -45,7 +54,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     func refresh() {
         browser.stop()
         browser = NetServiceBrowser()
-        phones.removeAll()
+        devices.removeAll()
         resolving.removeAll()
         attempts.removeAll()
         unresolvedCount = 0
@@ -66,7 +75,7 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
-        phones[service.name] = nil
+        devices[service.name] = nil
         resolving.removeAll { $0 == service }
         onChange?()
     }
@@ -75,10 +84,11 @@ final class PhoneBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegat
         guard let data = service.txtRecordData() else { return }
         let txt = NetService.dictionary(fromTXTRecord: data).mapValues { String(decoding: $0, as: UTF8.self) }
         logLine("resolved \(service.name): txt=\(txt) addrs=\(service.addresses?.count ?? 0)")
-        guard txt["os"] == "android", let host = Self.address(service.addresses ?? []) else { return }
+        guard let host = Self.address(service.addresses ?? []), let id = txt["id"], id != selfID else { return }
         if (attempts[service.name] ?? 0) >= 2 { unresolvedCount = max(0, unresolvedCount - 1) }
-        phones[service.name] = Phone(name: txt["name"] ?? service.name, host: host, port: service.port)
-        logLine("phone found: \(service.name) at \(host):\(service.port)")
+        let d = Phone(name: txt["name"] ?? service.name, host: host, port: service.port, id: id, os: txt["os"] ?? "", fp: txt["fp"] ?? "")
+        devices[service.name] = d
+        logLine("\(d.isPhone ? "phone" : "computer") found: \(service.name) at \(host):\(service.port)")
         onChange?()
     }
 

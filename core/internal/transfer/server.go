@@ -155,6 +155,29 @@ func (s *Server) localMux() *http.ServeMux {
 		s.RegisterOffer(o.ID, req.Paths)
 		writeJSON(w, 200, o)
 	})
+	// Pushes files to another computer (its Desktop) over pinned TLS.
+	m.HandleFunc("POST /local/send", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Paths  []string `json:"paths"`
+			Target Target   `json:"target"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Paths) == 0 || req.Target.Host == "" || req.Target.FP == "" {
+			http.Error(w, "paths and target required", 400)
+			return
+		}
+		c := NewClient(net.JoinHostPort(req.Target.Host, strconv.Itoa(req.Target.Port)), req.Target.FP, s.Dev.Name)
+		var sent []string
+		for _, p := range req.Paths {
+			res, err := c.SendFile(r.Context(), p, nil)
+			if err != nil {
+				writeJSON(w, 502, map[string]any{"error": err.Error(), "sent": sent})
+				return
+			}
+			sent = append(sent, res.Name)
+			s.logf("📤 %s → %s", res.Name, req.Target.Name)
+		}
+		writeJSON(w, 200, map[string]any{"sent": sent})
+	})
 	m.HandleFunc("GET /local/peers", func(w http.ResponseWriter, r *http.Request) {
 		if s.Peers == nil {
 			writeJSON(w, 200, []any{})

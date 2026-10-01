@@ -36,6 +36,7 @@ type Target struct {
 	Name string `json:"name"`
 	Host string `json:"host"`
 	Port int    `json:"port"`
+	FP   string `json:"fp,omitempty"` // computers only: TLS fingerprint to pin
 }
 
 type OfferResult struct {

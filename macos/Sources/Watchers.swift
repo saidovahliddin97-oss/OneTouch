@@ -65,44 +65,92 @@ extension NSImage {
     }
 }
 
-/// Pinch-in (two fingers together) on the trackpad while Finder is in front
-/// sends Finder's current selection to the phone.
+/// Trackpad pinches while Finder (or the Desktop) is in front:
+///  • pinch in  (fingers together) → send Finder's selection to the phone;
+///  • pinch out (fingers apart)    → pull the phone's latest photo to this Mac.
+/// Gesture events are read with a listen-only CGEvent tap, which (unlike an
+/// NSEvent global monitor) reliably sees trackpad gestures. It needs the
+/// «Мониторинг ввода» (Input Monitoring) permission.
 final class PinchWatcher {
-    var onPinch: (() -> Void)?
+    var onPinch: ((_ inward: Bool) -> Void)?
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
     private var monitor: Any?
     private var total: CGFloat = 0
     private var fired = false
 
+    static var permitted: Bool { CGPreflightListenEventAccess() }
+
     func start() {
-        guard monitor == nil else { return }
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: .magnify) { [weak self] e in self?.handle(e) }
+        guard tap == nil, monitor == nil else { return }
+        if !CGPreflightListenEventAccess() { _ = CGRequestListenEventAccess() }
+        let mask = CGEventMask(1 << 29) | CGEventMask(1 << 30) // NSEventTypeGesture, NSEventTypeMagnify
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            guard let refcon else { return Unmanaged.passUnretained(event) }
+            let me = Unmanaged<PinchWatcher>.fromOpaque(refcon).takeUnretainedValue()
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                if let t = me.tap { CGEvent.tapEnable(tap: t, enable: true) }
+            } else if type.rawValue == 30, let ns = NSEvent(cgEvent: event) {
+                me.handle(phase: ns.phase, magnification: ns.magnification)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+        if let t = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly,
+                                     eventsOfInterest: mask, callback: callback,
+                                     userInfo: Unmanaged.passUnretained(self).toOpaque()) {
+            tap = t
+            source = CFMachPortCreateRunLoopSource(nil, t, 0)
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            CGEvent.tapEnable(tap: t, enable: true)
+            logLine("pinch: event tap active")
+        } else {
+            // No Input Monitoring permission yet: fall back to the (less reliable) monitor.
+            monitor = NSEvent.addGlobalMonitorForEvents(matching: .magnify) { [weak self] e in
+                self?.handle(phase: e.phase, magnification: e.magnification)
+            }
+            logLine("pinch: event tap unavailable (Input Monitoring not granted), using global monitor")
+        }
     }
 
     func stop() {
+        if let t = tap { CGEvent.tapEnable(tap: t, enable: false) }
+        if let s = source { CFRunLoopRemoveSource(CFRunLoopGetMain(), s, .commonModes) }
+        tap = nil
+        source = nil
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
     }
 
-    private func handle(_ e: NSEvent) {
-        switch e.phase {
+    /// Restart after the user grants Input Monitoring.
+    func restart() {
+        stop()
+        start()
+    }
+
+    private func handle(phase: NSEvent.Phase, magnification: CGFloat) {
+        switch phase {
         case .began:
             total = 0
             fired = false
         case .changed:
-            total += e.magnification
-            if total < -0.45 && !fired {
-                fired = true
-                if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" {
-                    onPinch?()
-                }
+            total += magnification
+            guard !fired, abs(total) > 0.4 else { return }
+            fired = true
+            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            logLine("pinch \(total < 0 ? "in" : "out") in \(front ?? "?")")
+            if front == "com.apple.finder" {
+                let inward = total < 0
+                DispatchQueue.main.async { self.onPinch?(inward) }
             }
         default:
             total = 0
         }
     }
 
+    enum SelectionError: Error { case notAllowed, failed(String) }
+
     /// Paths selected in Finder (asks for Automation permission the first time).
-    static func finderSelection() -> [String] {
+    static func finderSelection() -> Result<[String], SelectionError> {
         let src = """
         tell application "Finder"
             set out to ""
@@ -113,7 +161,12 @@ final class PinchWatcher {
         end tell
         """
         var err: NSDictionary?
-        guard let res = NSAppleScript(source: src)?.executeAndReturnError(&err).stringValue else { return [] }
-        return res.split(separator: "\n").map(String.init).filter { !$0.hasSuffix("/") }
+        let res = NSAppleScript(source: src)?.executeAndReturnError(&err)
+        if let err {
+            let code = err[NSAppleScript.errorNumber] as? Int ?? 0
+            return .failure(code == -1743 ? .notAllowed : .failed(err[NSAppleScript.errorMessage] as? String ?? "\(code)"))
+        }
+        let paths = (res?.stringValue ?? "").split(separator: "\n").map(String.init).filter { !$0.hasSuffix("/") }
+        return .success(paths)
     }
 }

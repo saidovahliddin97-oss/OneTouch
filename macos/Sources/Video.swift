@@ -150,6 +150,13 @@ final class H264Encoder {
         session = s
     }
 
+    /// Live bitrate change (phone's quality switch).
+    func setBitrate(_ bps: Int) {
+        guard let session else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: max(500_000, min(bps, 30_000_000)) as CFNumber)
+        requestKeyframe()
+    }
+
     func requestKeyframe() {
         lock.lock(); forceKey = true; lock.unlock()
     }

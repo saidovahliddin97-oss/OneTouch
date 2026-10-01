@@ -9,7 +9,15 @@ final class AppState: ObservableObject {
     }
 
     @Published var coreError: String?
+    struct Device: Identifiable {
+        let id: String
+        let name: String
+        let isPhone: Bool
+    }
+
     @Published var phones: [String] = []
+    @Published var devices: [Device] = []
+    @Published var gesturesAllowed = true
     @Published var localNetworkProblem = false
     @Published var sessions: [Session] = []
     @Published var lastReceived: String?
@@ -28,6 +36,9 @@ struct PanelActions {
     var endSession: (String) -> Void
     var openScreenSettings: () -> Void
     var openAccessibilitySettings: () -> Void
+    var sendTo: (String) -> Void
+    var pullFrom: (String) -> Void
+    var openInputMonitoringSettings: () -> Void
     var openLocalNetworkSettings: () -> Void
     var settingsChanged: () -> Void
     var forgetDevices: () -> Void
@@ -48,7 +59,7 @@ struct PanelView: View {
             devices
             if !state.sessions.isEmpty { sessions }
             actionsRow
-            if !state.screenAllowed || !state.controlAllowed { permissions }
+            if !state.screenAllowed || !state.controlAllowed || (!state.gesturesAllowed && state.pinch) { permissions }
             settings
             footer
         }
@@ -78,16 +89,16 @@ struct PanelView: View {
 
     private var devices: some View {
         Card(title: "Устройства") {
-            if state.phones.isEmpty {
+            if state.devices.isEmpty {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: state.localNetworkProblem ? "wifi.exclamationmark" : "iphone.slash")
                         .foregroundColor(.secondary).frame(width: 22)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(state.localNetworkProblem ? "Нет доступа к локальной сети" : "Телефон не найден")
+                        Text(state.localNetworkProblem ? "Нет доступа к локальной сети" : "Устройства не найдены")
                             .font(.system(size: 13, weight: .medium))
                         Text(state.localNetworkProblem
                              ? "Разрешите OneTouch «Локальную сеть» в настройках."
-                             : "Откройте OneTouch на Android в этой же Wi‑Fi сети.")
+                             : "Откройте OneTouch на телефоне или другом компьютере в этой же Wi‑Fi сети.")
                             .font(.caption).foregroundColor(.secondary)
                         if state.localNetworkProblem {
                             Button("Открыть настройки", action: actions.openLocalNetworkSettings).buttonStyle(.link).font(.caption)
@@ -95,15 +106,19 @@ struct PanelView: View {
                     }
                 }
             } else {
-                ForEach(state.phones, id: \.self) { name in
+                ForEach(state.devices) { d in
                     HStack(spacing: 10) {
-                        Image(systemName: "iphone").font(.system(size: 16)).foregroundColor(.accentColor).frame(width: 22)
+                        Image(systemName: d.isPhone ? "iphone" : "laptopcomputer")
+                            .font(.system(size: 16)).foregroundColor(.accentColor).frame(width: 22)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(name).font(.system(size: 13, weight: .medium))
-                            Text("В сети").font(.caption).foregroundColor(.secondary)
+                            Text(d.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                            Text(d.isPhone ? "Телефон · в сети" : "Компьютер · в сети").font(.caption).foregroundColor(.secondary)
                         }
                         Spacer()
-                        Circle().fill(Color.green).frame(width: 7, height: 7)
+                        if d.isPhone {
+                            IconButton(symbol: "photo.badge.arrow.down", help: "Забрать последнее фото") { actions.pullFrom(d.id) }
+                        }
+                        IconButton(symbol: "paperplane", help: "Отправить файлы") { actions.sendTo(d.id) }
                     }
                 }
             }
@@ -132,10 +147,14 @@ struct PanelView: View {
     }
 
     private var permissions: some View {
-        Card(title: "Разрешения для экрана") {
+        Card(title: "Разрешения") {
             if !state.screenAllowed {
                 PermissionRow(symbol: "rectangle.dashed.badge.record", text: "Запись экрана — чтобы видеть Mac с телефона",
                               action: actions.openScreenSettings)
+            }
+            if !state.gesturesAllowed && state.pinch {
+                PermissionRow(symbol: "hand.pinch", text: "Мониторинг ввода — для щипков на тачпаде",
+                              action: actions.openInputMonitoringSettings)
             }
             if !state.controlAllowed {
                 PermissionRow(symbol: "hand.tap", text: "Универсальный доступ — чтобы управлять Mac с телефона",
@@ -147,7 +166,7 @@ struct PanelView: View {
     private var settings: some View {
         Card(title: "Настройки") {
             Toggle("⌘C на файле — предложить телефону", isOn: $state.offerOnCopy)
-            Toggle("Щипок на тачпаде в Finder — на телефон", isOn: $state.pinch)
+            Toggle("Щипки в Finder: свести — на телефон, развести — фото с телефона", isOn: $state.pinch)
             Toggle("Полученное — сразу в буфер (⌘V)", isOn: $state.toClipboard)
             Toggle("Запускать при входе", isOn: $state.launchAtLogin)
         }
@@ -224,6 +243,22 @@ private struct BigButton: View {
         .buttonStyle(.plain)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.accentColor.opacity(0.12)))
         .foregroundColor(.accentColor)
+    }
+}
+
+private struct IconButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 13)).frame(width: 26, height: 26)
+                .background(Circle().fill(Color.accentColor.opacity(0.12)))
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(.accentColor)
+        .help(help)
     }
 }
 

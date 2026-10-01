@@ -18,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private let popover = NSPopover()
     private var window: NSWindow?
     private var lastReceived: URL?
+    /// This Mac as phones need to see it (filled from the core's "ready" event).
+    private var me: [String: Any] = [:]
     private var warnedLocalNetwork = false
     private var screenSessions: [String: ScreenSession] = [:]
     private var mirrorSessions: [String: MirrorSession] = [:]
@@ -65,12 +67,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         sessionServer.start()
 
         clipboard.onFiles = { [weak self] urls in self?.offer(urls.map(\.path), reason: "⌘C") }
-        pinch.onPinch = { [weak self] in
-            let paths = PinchWatcher.finderSelection()
-            if paths.isEmpty {
-                self?.notify("Выделите файл в Finder", "Потом сведите два пальца на тачпаде")
+        pinch.onPinch = { [weak self] inward in
+            guard let self else { return }
+            if inward {
+                self.sendFinderSelection(reason: "щипок")
             } else {
-                self?.offer(paths, reason: "щипок")
+                self.pullLatest()
             }
         }
         applySettings()
@@ -157,6 +159,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 InputInjector.requestPermission()
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
             },
+            sendTo: { [weak self] key in self?.sendFiles(to: key) },
+            pullFrom: { [weak self] key in self?.pullLatest(from: key) },
+            openInputMonitoringSettings: {
+                _ = CGRequestListenEventAccess()
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
+            },
             openLocalNetworkSettings: {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!)
             },
@@ -172,6 +180,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func refreshPermissions() {
         state.screenAllowed = CGPreflightScreenCaptureAccess()
         state.controlAllowed = InputInjector.allowed
+        let gestures = PinchWatcher.permitted
+        if gestures && !state.gesturesAllowed && state.pinch { pinch.restart() } // granted meanwhile
+        state.gesturesAllowed = gestures
+    }
+
+    // MARK: - Pinch & devices
+
+    private func sendFinderSelection(reason: String) {
+        switch PinchWatcher.finderSelection() {
+        case .success(let paths) where !paths.isEmpty:
+            offer(paths, reason: reason)
+        case .success:
+            notify("Выделите файл в Finder", "Потом сведите два пальца на тачпаде — файл уйдёт на телефон")
+        case .failure(.notAllowed):
+            notify("Разрешите OneTouch управлять Finder",
+                   "Системные настройки → Конфиденциальность и безопасность → Автоматизация → OneTouch → Finder")
+        case .failure(.failed(let msg)):
+            notify("Не удалось взять выделение Finder", msg)
+        }
+    }
+
+    /// Pinch out: the phone uploads its newest photo here (Desktop + clipboard).
+    private func pullLatest(from key: String? = nil) {
+        let targets = key.flatMap { phones.devices[$0] }.map { [$0] } ?? Array(phones.phones.values)
+        guard !targets.isEmpty, !me.isEmpty else {
+            notify("Телефон не найден", "Откройте OneTouch на Android в этой же Wi‑Fi сети")
+            return
+        }
+        for phone in targets {
+            Daemon.pullLatest(from: phone, me: me) { [weak self] err in
+                if let err { self?.notify("Не удалось забрать фото", "\(phone.name): \(err)") }
+            }
+        }
+    }
+
+    private func sendFiles(to key: String) {
+        guard let d = phones.devices[key] else { return }
+        popover.performClose(nil)
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.prompt = "Отправить на \(d.name)"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK else { return }
+        let paths = panel.urls.map(\.path)
+        if d.isPhone {
+            daemon.offer(paths, to: [d]) { [weak self] result in
+                if case .failure(let e) = result { self?.notify("Не отправлено", e.message) }
+                else { self?.notify("→ \(d.name)", "Нажмите «Получить» на телефоне") }
+            }
+        } else {
+            daemon.send(paths, to: d) { [weak self] err in
+                self?.notify(err == nil ? "✓ Отправлено на \(d.name)" : "Не отправлено на \(d.name)",
+                             err ?? "Файлы на рабочем столе \(d.name)")
+            }
+        }
     }
 
     private func applySettings() {
@@ -194,6 +258,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func updatePhones() {
         let names = Set(phones.phones.values.map(\.name)).sorted()
         state.phones = names
+        state.devices = phones.devices.map { key, d in
+            AppState.Device(id: key, name: d.name, isPhone: d.isPhone)
+        }.filter { $0.isPhone || !(phones.devices[$0.id]?.fp.isEmpty ?? true) }
+            .sorted { ($0.isPhone ? 0 : 1, $0.name) < ($1.isPhone ? 0 : 1, $1.name) }
         state.localNetworkProblem = names.isEmpty && phones.unresolvedCount > 0
         if state.localNetworkProblem && !warnedLocalNetwork {
             warnedLocalNetwork = true
@@ -261,7 +329,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let s = ScreenSession(peer: peer, fc: fc, fake: fake)
             s.selection = { [weak self] in
                 if let test = self?.env["ONETOUCH_TEST_GRAB"] { return [test] }
-                return PinchWatcher.finderSelection()
+                if case .success(let paths) = PinchWatcher.finderSelection() { return paths }
+                return []
             }
             s.registerOffer = { [weak self] paths, done in self?.daemon.registerOffer(paths, completion: done) }
             s.onEnd = { [weak self] in
@@ -326,6 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         case "ready":
             if let id = e.id, let fp = e.fp, let port = e.port {
                 phones.publish(name: e.name ?? "Mac", id: id, fp: fp, port: port)
+                me = ["from": e.name ?? "Mac", "fromId": id, "fp": fp, "port": port]
             }
         case "received":
             guard let path = e.path else { return }
