@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private let state = AppState()
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
+    private var window: NSWindow?
     private var lastReceived: URL?
     private var warnedLocalNetwork = false
     private var screenSessions: [String: ScreenSession] = [:]
@@ -80,6 +81,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             state.launchAtLogin = SMAppService.mainApp.status == .enabled
             notify("OneTouch в строке меню", "Файлы и экран между Mac и телефоном. Нажмите на значок ⇄ в строке меню.")
         }
+        // Shown on start too: the menu-bar icon can hide behind the notch on a crowded menu bar.
+        if env["ONETOUCH_FAKE_SCREEN"] == nil { showWindow() }
+    }
+
+    /// Launching OneTouch again (Spotlight, Launchpad, Finder) opens its window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return true
+    }
+
+    private func showWindow() {
+        refreshPermissions()
+        updatePhones()
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 560),
+                             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+                             backing: .buffered, defer: false)
+            w.title = "OneTouch"
+            w.titlebarAppearsTransparent = true
+            w.isReleasedWhenClosed = false
+            w.contentViewController = NSHostingController(rootView: PanelView(state: state, actions: panelActions()).padding(.top, 12))
+            w.center()
+            window = w
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
     }
 
     func applicationWillTerminate(_ note: Notification) {
