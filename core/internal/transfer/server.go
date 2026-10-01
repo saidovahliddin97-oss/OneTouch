@@ -34,6 +34,7 @@ import (
 //
 // Control API for the local menu-bar app, bound to 127.0.0.1 only:
 //
+//	POST /local/register-offer {"paths":[...]} -> Offer JSON (no delivery)
 //	POST /local/offer {"paths":[...], "targets":[...]}
 //	                                     offer files to phones (targets: phones
 //	                                     already found by the app; else mDNS)
@@ -41,11 +42,14 @@ import (
 type Server struct {
 	Dev    *identity.Device
 	OutDir string
-	Notify bool        // OS notification per received file (CLI use)
-	Events func(Event) // structured events for the menu-bar app
-	Offer  func([]string, []Target) (OfferResult, error)
-	Peers  func() any
-	Logf   func(format string, a ...any)
+	Port   int // TLS port, announced in offers
+	// SessionAddr is the desktop app media endpoint (default 127.0.0.1:SessionPort).
+	SessionAddr string
+	Notify      bool        // OS notification per received file (CLI use)
+	Events      func(Event) // structured events for the menu-bar app
+	Offer       func([]string, []Target) (OfferResult, error)
+	Peers       func() any
+	Logf        func(format string, a ...any)
 
 	mu     sync.Mutex
 	offers map[string]*offer
@@ -106,6 +110,8 @@ func (s *Server) apiMux() *http.ServeMux {
 	m.HandleFunc("PUT /v1/files", s.handleUpload)
 	m.HandleFunc("POST /v1/files", s.handleUpload)
 	m.HandleFunc("GET /v1/offers/{id}/{n}", s.handleOfferData)
+	m.HandleFunc("GET /v1/screen", s.handleSession("screen"))
+	m.HandleFunc("GET /v1/mirror", s.handleSession("mirror"))
 	return m
 }
 
@@ -130,6 +136,24 @@ func (s *Server) localMux() *http.ServeMux {
 			return
 		}
 		writeJSON(w, 200, res)
+	})
+	// Registers files for download without notifying anyone; the app hands
+	// the returned offer to a phone over an open screen session.
+	m.HandleFunc("POST /local/register-offer", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Paths []string `json:"paths"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Paths) == 0 {
+			http.Error(w, "paths required", 400)
+			return
+		}
+		o, err := NewOffer(req.Paths, s.Dev.Name, s.Dev.ID, s.Dev.Fingerprint, s.Port)
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		s.RegisterOffer(o.ID, req.Paths)
+		writeJSON(w, 200, o)
 	})
 	m.HandleFunc("GET /local/peers", func(w http.ResponseWriter, r *http.Request) {
 		if s.Peers == nil {

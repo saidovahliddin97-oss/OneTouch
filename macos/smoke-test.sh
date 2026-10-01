@@ -7,13 +7,14 @@ set -eu
 cd "$(dirname "$0")"
 APP=build/OneTouch.app
 T=$(mktemp -d)
-( cd ../core && go build -o "$T/onetouch" ./cmd/onetouch && go build -o "$T/fakephone" ./cmd/fakephone )
+( cd ../core && go build -o "$T/onetouch" ./cmd/onetouch && go build -o "$T/fakephone" ./cmd/fakephone && go build -o "$T/fakeviewer" ./cmd/fakeviewer )
+head -c 1500000 /dev/urandom > "$T/grab.bin"
 
 mkdir -p ~/Desktop
 PHONE_PID=""
 # CI cannot click "Allow" on the Local Network prompt, so the app itself cannot
 # resolve Bonjour services here; the hook hands it the phone's address instead.
-ONETOUCH_EXTRA_PHONE=127.0.0.1:47480 "$APP/Contents/MacOS/OneTouch" > "$T/app.log" 2>&1 &
+ONETOUCH_EXTRA_PHONE=127.0.0.1:47480 ONETOUCH_FAKE_SCREEN=1 ONETOUCH_AUTO_TRUST=1 ONETOUCH_TEST_GRAB="$T/grab.bin" "$APP/Contents/MacOS/OneTouch" > "$T/app.log" 2>&1 &
 APP_PID=$!
 trap 'kill $APP_PID $PHONE_PID 2>/dev/null || true; echo "--- core log:"; cat ~/Library/Logs/OneTouch.log || true; echo "--- app log:"; cat "$T/app.log"; echo "--- phone log:"; cat "$T/phone.log" 2>/dev/null || true' EXIT
 for i in $(seq 1 30); do curl -sf http://127.0.0.1:47471/local/peers >/dev/null && break; sleep 1; done
@@ -54,4 +55,12 @@ for i in $(seq 1 20); do [ -s "$T/phone/to-phone.pdf" ] && break; sleep 1; done
 sleep 1
 cmp "$T/to-phone.pdf" "$T/phone/to-phone.pdf" || { echo "phone did not get the file"; cat "$T/phone.log"; exit 1; }
 echo "✓ ⌘C on a file → offer → phone downloaded it over pinned TLS"
+# Screen: the "phone" watches the Mac (synthetic screen: CI cannot grant
+# Screen Recording), sends input, and grabs the Finder selection mid-session.
+"$T/fakeviewer" screen 127.0.0.1:47470 "$T/rec.bin" "$T/grab.bin"
+grep -q "input .*move" "$T/app.log" && echo "✓ input events reach the Mac"
+# Mirror: replay the recorded H.264 as the phone's screen; the Mac must decode it.
+"$T/fakeviewer" mirror 127.0.0.1:47470 "$T/rec.bin"
+grep -q "30 frames decoded, layer=ok" "$T/app.log" || { echo "mirror window did not decode the stream"; exit 1; }
+echo "✓ mirror: phone screen decoded in a Mac window"
 echo "ALL SMOKE TESTS PASSED"

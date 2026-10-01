@@ -7,8 +7,8 @@
     <key>CFBundleIdentifier</key><string>app.onetouch.mac</string>
     <key>CFBundleExecutable</key><string>OneTouch</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.0</string>
-    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleShortVersionString</key><string>0.3.0</string>
+    <key>CFBundleVersion</key><string>3</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
@@ -17,6 +17,8 @@
     <string>OneTouch передаёт файлы напрямую между этим Mac и вашим телефоном по Wi‑Fi.</string>
     <key>NSBonjourServices</key>
     <array><string>_onetouch._tcp</string></array>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Чтобы показывать экран этого Mac на вашем телефоне.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Чтобы по щипку на тачпаде отправить на телефон файлы, выделенные в Finder.</string>
 </dict>

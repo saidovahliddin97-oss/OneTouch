@@ -10,6 +10,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 for arch in arm64 x86_64; do
   swiftc -O -target "$arch-apple-macos13.0" -framework AppKit -framework UserNotifications -framework ServiceManagement \
+    -framework SwiftUI -framework ScreenCaptureKit -framework VideoToolbox -framework CoreMedia -framework AVFoundation \
     Sources/*.swift -o "$OUT/OneTouch-$arch"
 done
 lipo -create "$OUT/OneTouch-arm64" "$OUT/OneTouch-x86_64" -output "$APP/Contents/MacOS/OneTouch"

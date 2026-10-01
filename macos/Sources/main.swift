@@ -1,23 +1,27 @@
 import AppKit
 import ServiceManagement
+import SwiftUI
 import UserNotifications
 
-/// OneTouch for macOS: a menu-bar app around the Go core.
+/// OneTouch for macOS: a menu-bar panel around the Go core.
 ///  • phone → Mac: files land on the Desktop and in the clipboard (⌘V);
-///  • Mac → phone: ⌘C on files in Finder, or a pinch on the trackpad, and the
-///    phone shows «Получить».
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
+///  • Mac → phone: ⌘C on files in Finder, or a pinch on the trackpad → «Получить»;
+///  • screen: the phone watches and controls this Mac, or shows its own screen here.
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private let daemon = Daemon()
     private let clipboard = ClipboardWatcher()
     private let pinch = PinchWatcher()
     private let phones = PhoneBrowser()
+    private let sessionServer = SessionServer()
+    private let state = AppState()
     private var statusItem: NSStatusItem!
-    private let statusLine = NSMenuItem(title: "Запуск…", action: nil, keyEquivalent: "")
-    private let phoneLine = NSMenuItem(title: "Телефон: ищу…", action: nil, keyEquivalent: "")
+    private let popover = NSPopover()
     private var lastReceived: URL?
-    private var coreError: String?
     private var warnedLocalNetwork = false
+    private var screenSessions: [String: ScreenSession] = [:]
+    private var mirrorSessions: [String: MirrorSession] = [:]
     private let defaults = UserDefaults.standard
+    private let env = ProcessInfo.processInfo.environment
 
     private enum Key {
         static let offerOnCopy = "offerOnCopy"
@@ -28,10 +32,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     func applicationDidFinishLaunching(_ note: Notification) {
         defaults.register(defaults: [Key.offerOnCopy: true, Key.pinch: true, Key.toClipboard: true])
+        state.offerOnCopy = defaults.bool(forKey: Key.offerOnCopy)
+        state.pinch = defaults.bool(forKey: Key.pinch)
+        state.toClipboard = defaults.bool(forKey: Key.toClipboard)
+        state.launchAtLogin = SMAppService.mainApp.status == .enabled
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        setIcon(ok: true)
-        buildMenu()
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePanel)
+        updateIcon()
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: PanelView(state: state, actions: panelActions()))
 
         let center = UNUserNotificationCenter.current()
         center.delegate = self
@@ -41,13 +52,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         daemon.onEvent = { [weak self] e in self?.handle(e) }
         daemon.onStatus = { [weak self] err in
-            self?.coreError = err
-            self?.setIcon(ok: err == nil)
-            self?.statusLine.title = err.map { "⚠︎ \($0)" } ?? "OneTouch работает"
+            self?.state.coreError = err
+            self?.updateIcon()
         }
         daemon.start()
-        phones.onChange = { [weak self] in self?.updatePhoneLine() }
+        phones.onChange = { [weak self] in self?.updatePhones() }
         phones.start()
+        sessionServer.onSession = { [weak self] peer, fc in
+            DispatchQueue.main.async { self?.incoming(peer, fc) }
+        }
+        sessionServer.start()
 
         clipboard.onFiles = { [weak self] urls in self?.offer(urls.map(\.path), reason: "⌘C") }
         pinch.onPinch = { [weak self] in
@@ -58,115 +72,111 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 self?.offer(paths, reason: "щипок")
             }
         }
-        applyToggles()
+        applySettings()
 
         if !defaults.bool(forKey: Key.launched) {
             defaults.set(true, forKey: Key.launched)
             try? SMAppService.mainApp.register() // start at login by default
-            notify("OneTouch в строке меню", "Щипок по фото на телефоне — файл тут. ⌘C на файле — «Получить» на телефоне.")
+            state.launchAtLogin = SMAppService.mainApp.status == .enabled
+            notify("OneTouch в строке меню", "Файлы и экран между Mac и телефоном. Нажмите на значок ⇄ в строке меню.")
         }
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        screenSessions.values.forEach { $0.stop() }
+        mirrorSessions.values.forEach { $0.stop() }
         daemon.stop()
     }
 
-    // MARK: - Menu
+    // MARK: - Panel
 
-    private func setIcon(ok: Bool) {
-        let name = ok ? "arrow.left.arrow.right.circle" : "exclamationmark.triangle"
+    @objc private func togglePanel() {
+        if popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        refreshPermissions()
+        updatePhones()
+        if let button = statusItem.button {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    private func updateIcon() {
+        let live = !screenSessions.isEmpty || !mirrorSessions.isEmpty
+        let name = state.coreError != nil ? "exclamationmark.triangle" : (live ? "record.circle" : "arrow.left.arrow.right.circle")
         let img = NSImage(systemSymbolName: name, accessibilityDescription: "OneTouch")
-        img?.isTemplate = true
+        img?.isTemplate = !live
         statusItem.button?.image = img
+        statusItem.button?.contentTintColor = live ? .systemRed : nil
     }
 
-    private func buildMenu() {
-        let m = NSMenu()
-        m.delegate = self
-        statusLine.isEnabled = false
-        phoneLine.isEnabled = false
-        m.addItem(statusLine)
-        m.addItem(phoneLine)
-        m.addItem(.separator())
-        m.addItem(item("Отправить файл на телефон…", #selector(pickAndSend), "o"))
-        m.addItem(item("Показать последний полученный", #selector(revealLast), ""))
-        m.addItem(.separator())
-        m.addItem(toggle("Предлагать телефону при ⌘C", Key.offerOnCopy))
-        m.addItem(toggle("Щипок на тачпаде в Finder → телефон", Key.pinch))
-        m.addItem(toggle("Полученное — сразу в буфер (⌘V)", Key.toClipboard))
-        let login = item("Запускать при входе", #selector(toggleLogin), "")
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        m.addItem(login)
-        m.addItem(.separator())
-        m.addItem(item("Настройки «Локальная сеть»…", #selector(openLocalNetworkSettings), ""))
-        m.addItem(item("Журнал", #selector(openLog), ""))
-        m.addItem(item("Выйти из OneTouch", #selector(quit), "q"))
-        statusItem.menu = m
+    private func panelActions() -> PanelActions {
+        PanelActions(
+            sendFile: { [weak self] in self?.pickAndSend() },
+            revealLast: { [weak self] in
+                if let u = self?.lastReceived { NSWorkspace.shared.activateFileViewerSelecting([u]) }
+            },
+            endSession: { [weak self] id in
+                self?.screenSessions[id]?.stop()
+                self?.mirrorSessions[id]?.stop()
+            },
+            openScreenSettings: {
+                _ = CGRequestScreenCaptureAccess()
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+            },
+            openAccessibilitySettings: {
+                InputInjector.requestPermission()
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            },
+            openLocalNetworkSettings: {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!)
+            },
+            settingsChanged: { [weak self] in self?.applySettings() },
+            forgetDevices: { TrustStore.forgetAll() },
+            openLog: {
+                NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/OneTouch.log"))
+            },
+            quit: { NSApp.terminate(nil) }
+        )
     }
 
-    private func item(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {
-        let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        i.target = self
-        return i
+    private func refreshPermissions() {
+        state.screenAllowed = CGPreflightScreenCaptureAccess()
+        state.controlAllowed = InputInjector.allowed
     }
 
-    private func toggle(_ title: String, _ key: String) -> NSMenuItem {
-        let i = item(title, #selector(flip(_:)), "")
-        i.representedObject = key
-        i.state = defaults.bool(forKey: key) ? .on : .off
-        return i
-    }
-
-    func menuWillOpen(_ menu: NSMenu) {
-        if let login = menu.items.first(where: { $0.action == #selector(toggleLogin) }) {
-            login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    private func applySettings() {
+        defaults.set(state.offerOnCopy, forKey: Key.offerOnCopy)
+        defaults.set(state.pinch, forKey: Key.pinch)
+        defaults.set(state.toClipboard, forKey: Key.toClipboard)
+        state.offerOnCopy ? clipboard.start() : clipboard.stop()
+        state.pinch ? pinch.start() : pinch.stop()
+        let enabled = SMAppService.mainApp.status == .enabled
+        if state.launchAtLogin != enabled {
+            do {
+                if state.launchAtLogin { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            } catch {
+                notify("Не получилось", "Переместите OneTouch в папку «Программы» и попробуйте снова")
+                state.launchAtLogin = enabled
+            }
         }
-        updatePhoneLine()
     }
 
-    private func updatePhoneLine() {
+    private func updatePhones() {
         let names = Set(phones.phones.values.map(\.name)).sorted()
-        if !names.isEmpty {
-            phoneLine.title = "Телефон: " + names.joined(separator: ", ")
-        } else if phones.unresolvedCount > 0 {
-            phoneLine.title = "⚠︎ Разрешите OneTouch «Локальную сеть» в настройках"
-            if !warnedLocalNetwork {
-                warnedLocalNetwork = true
-                notify("Нужен доступ к локальной сети",
-                       "Системные настройки → Конфиденциальность и безопасность → Локальная сеть → включите OneTouch")
-            }
-        } else {
-            phoneLine.title = "Телефон не найден — откройте OneTouch на Android"
+        state.phones = names
+        state.localNetworkProblem = names.isEmpty && phones.unresolvedCount > 0
+        if state.localNetworkProblem && !warnedLocalNetwork {
+            warnedLocalNetwork = true
+            notify("Нужен доступ к локальной сети",
+                   "Системные настройки → Конфиденциальность и безопасность → Локальная сеть → включите OneTouch")
         }
     }
 
-    @objc private func flip(_ sender: NSMenuItem) {
-        guard let key = sender.representedObject as? String else { return }
-        let on = !defaults.bool(forKey: key)
-        defaults.set(on, forKey: key)
-        sender.state = on ? .on : .off
-        applyToggles()
-    }
-
-    private func applyToggles() {
-        defaults.bool(forKey: Key.offerOnCopy) ? clipboard.start() : clipboard.stop()
-        defaults.bool(forKey: Key.pinch) ? pinch.start() : pinch.stop()
-    }
-
-    @objc private func toggleLogin(_ sender: NSMenuItem) {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            notify("Не получилось", "Переместите OneTouch в папку «Программы» и попробуйте снова")
-        }
-        sender.state = SMAppService.mainApp.status == .enabled ? .on : .off
-    }
-
-    @objc private func pickAndSend() {
+    private func pickAndSend() {
+        popover.performClose(nil)
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -177,24 +187,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    @objc private func revealLast() {
-        if let u = lastReceived {
-            NSWorkspace.shared.activateFileViewerSelecting([u])
+    // MARK: - Screen sessions
+
+    private func incoming(_ peer: SessionPeer, _ fc: FrameConn) {
+        let start = { [weak self] in self?.startSession(peer, fc) }
+        if TrustStore.isTrusted(peer) || env["ONETOUCH_AUTO_TRUST"] != nil {
+            start()
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = peer.kind == "screen"
+            ? "«\(peer.name)» хочет видеть экран этого Mac и управлять им"
+            : "«\(peer.name)» хочет показать свой экран на этом Mac"
+        alert.informativeText = "Разрешайте только своему телефону. Трансляцию можно завершить в любой момент из значка OneTouch в строке меню."
+        alert.addButton(withTitle: "Разрешить")
+        alert.addButton(withTitle: "Запретить")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Запомнить этот телефон"
+        alert.suppressionButton?.state = .on
+        if alert.runModal() == .alertFirstButtonReturn {
+            if alert.suppressionButton?.state == .on { TrustStore.trust(peer) }
+            start()
+        } else {
+            fc.queue.async {
+                fc.sendJSON(.status, ["text": "Mac отклонил запрос"])
+                fc.queue.asyncAfter(deadline: .now() + 0.3) { fc.close() }
+            }
         }
     }
 
-    @objc private func openLocalNetworkSettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!
-        NSWorkspace.shared.open(url)
+    private func startSession(_ peer: SessionPeer, _ fc: FrameConn) {
+        let key = peer.kind + ":" + peer.id
+        if peer.kind == "screen" {
+            screenSessions[key]?.stop()
+            let fake = env["ONETOUCH_FAKE_SCREEN"] != nil
+            if !fake && !CGPreflightScreenCaptureAccess() {
+                _ = CGRequestScreenCaptureAccess()
+                fc.queue.async {
+                    fc.sendJSON(.status, ["text": "Разрешите OneTouch «Запись экрана» на Mac (Настройки → Конфиденциальность), затем перезапустите OneTouch"])
+                    fc.queue.asyncAfter(deadline: .now() + 0.5) { fc.close() }
+                }
+                notify("Нужно разрешение «Запись экрана»", "Чтобы показать экран Mac на телефоне")
+                return
+            }
+            let s = ScreenSession(peer: peer, fc: fc, fake: fake)
+            s.selection = { [weak self] in
+                if let test = self?.env["ONETOUCH_TEST_GRAB"] { return [test] }
+                return PinchWatcher.finderSelection()
+            }
+            s.registerOffer = { [weak self] paths, done in self?.daemon.registerOffer(paths, completion: done) }
+            s.onEnd = { [weak self] in
+                self?.screenSessions[key] = nil
+                self?.sessionsChanged()
+            }
+            screenSessions[key] = s
+            s.start()
+            notify("\(peer.name) смотрит экран Mac", "Завершить можно из значка OneTouch в строке меню")
+        } else {
+            mirrorSessions[key]?.stop()
+            let m = MirrorSession(peer: peer, fc: fc)
+            m.registerOffer = { [weak self] paths, done in self?.daemon.registerOffer(paths, completion: done) }
+            m.onEnd = { [weak self] in
+                self?.mirrorSessions[key] = nil
+                self?.sessionsChanged()
+            }
+            mirrorSessions[key] = m
+            m.start()
+        }
+        sessionsChanged()
     }
 
-    @objc private func openLog() {
-        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/OneTouch.log")
-        NSWorkspace.shared.open(url)
-    }
-
-    @objc private func quit() {
-        NSApp.terminate(nil)
+    private func sessionsChanged() {
+        state.sessions = screenSessions.map { AppState.Session(id: $0.key, title: "\($0.value.peer.name) смотрит этот Mac", symbol: "display") }
+            + mirrorSessions.map { AppState.Session(id: $0.key, title: "Экран \($0.value.peer.name)", symbol: "iphone") }
+        updateIcon()
     }
 
     // MARK: - Transfers
@@ -204,7 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         var targets = Array(phones.phones.values)
         // Test hook: ONETOUCH_EXTRA_PHONE=host:port adds a phone that Bonjour may not
         // see (CI machines cannot grant the Local Network permission).
-        if let extra = ProcessInfo.processInfo.environment["ONETOUCH_EXTRA_PHONE"],
+        if let extra = env["ONETOUCH_EXTRA_PHONE"],
            let colon = extra.lastIndex(of: ":"), let port = Int(extra[extra.index(after: colon)...]) {
             targets.append(PhoneBrowser.Phone(name: "test-phone", host: String(extra[..<colon]), port: port))
         }
@@ -237,8 +304,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             guard let path = e.path else { return }
             let url = URL(fileURLWithPath: path)
             lastReceived = url
+            state.lastReceived = url.lastPathComponent
             var subtitle = "На рабочем столе"
-            if defaults.bool(forKey: Key.toClipboard) {
+            if state.toClipboard {
                 let pb = NSPasteboard.general
                 pb.clearContents()
                 pb.writeObjects([url as NSURL])
@@ -247,7 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             }
             notify("📥 \(e.name ?? url.lastPathComponent) от \(e.from ?? "телефона")", subtitle, file: url)
         case "error":
-            if let msg = e.error { statusLine.title = "⚠︎ \(msg)" }
+            if let msg = e.error { logLine("core: \(msg)") }
         default:
             break
         }

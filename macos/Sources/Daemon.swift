@@ -131,6 +131,21 @@ final class Daemon {
     }
 }
 
+extension Daemon {
+    /// Registers files for download and returns the offer JSON (no delivery);
+    /// used to hand files to a phone over an open screen session.
+    func registerOffer(_ paths: [String], completion: @escaping (Data?) -> Void) {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:47471/local/register-offer")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["paths": paths])
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            let ok = (resp as? HTTPURLResponse)?.statusCode == 200
+            completion(ok ? data : nil)
+        }.resume()
+    }
+}
+
 struct OfferError: Error {
     let message: String
 }

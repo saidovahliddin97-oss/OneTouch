@@ -132,7 +132,7 @@ func cmdServe(args []string) error {
 		}
 	}
 
-	srv := &transfer.Server{Dev: dev, OutDir: *out, Notify: !*noNotify && !*events, Events: emit, Logf: logf}
+	srv := &transfer.Server{Dev: dev, OutDir: *out, Port: *port, Notify: !*noNotify && !*events, Events: emit, Logf: logf}
 	srv.Offer = func(paths []string, targets []transfer.Target) (transfer.OfferResult, error) {
 		res, err := offerToPhones(context.Background(), dev, srv, paths, targets, *port)
 		if err != nil {
