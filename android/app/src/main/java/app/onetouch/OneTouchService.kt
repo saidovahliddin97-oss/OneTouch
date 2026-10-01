@@ -164,41 +164,11 @@ class OneTouchService : Service() {
     private fun accept(id: String) {
         val o = offers.remove(id) ?: return
         nm.cancel(offerNotifId(id))
-        var last: android.net.Uri? = null
         try {
-            o.files.forEachIndexed { i, f ->
-                val target = Media.createTarget(this, f.name)
-                try {
-                    contentResolver.openOutputStream(target)!!.use { out ->
-                        Net.download(o, i, out) { done, total ->
-                            nm.notify(NOTIF_PROGRESS, progressNotification("${f.name} ← ${o.from}", done, total))
-                        }
-                    }
-                    Media.publish(this, target)
-                    last = target
-                } catch (e: Exception) {
-                    runCatching { contentResolver.delete(target, null, null) }
-                    throw e
-                }
-            }
+            Receiver.receive(this, o)
             // The sender proved its identity via the pinned download: remember it.
             if (o.fromId.isNotEmpty()) setDesktop(Peer(o.fromId, o.from, "", o.fp, o.host, o.port))
-            nm.cancel(NOTIF_PROGRESS)
-            val what = if (o.files.size == 1) o.files[0].name else "${o.files.size} файлов"
-            val view = Intent(Intent.ACTION_VIEW).setDataAndType(last, Media.mimeOf(this, last!!))
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            nm.notify(
-                NOTIF_DONE,
-                Notification.Builder(this, CH_DONE)
-                    .setSmallIcon(R.drawable.ic_tile)
-                    .setContentTitle("✓ Получено: $what")
-                    .setContentText("Галерея → альбом OneTouch (или Загрузки/OneTouch)")
-                    .setAutoCancel(true)
-                    .setContentIntent(PendingIntent.getActivity(this, 3, view, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
-                    .build(),
-            )
         } catch (e: Exception) {
-            nm.cancel(NOTIF_PROGRESS)
             Bus.toasts.tryEmit("Не удалось получить: ${e.message}")
         }
     }
@@ -222,14 +192,7 @@ class OneTouchService : Service() {
     }
 
     private fun progressNotification(title: String, done: Long, total: Long): Notification =
-        Notification.Builder(this, CH_TRANSFER)
-            .setSmallIcon(R.drawable.ic_tile)
-            .setContentTitle(title)
-            .setContentText("${humanBytes(done)} из ${humanBytes(total)}")
-            .setProgress(100, if (total > 0) (100 * done / total).toInt() else 0, total <= 0)
-            .setOnlyAlertOnce(true)
-            .setOngoing(true)
-            .build()
+        Receiver.progress(this, title, done, total)
 
     private fun servicePending(action: String, offerId: String, code: Int): PendingIntent {
         val i = Intent(this, OneTouchService::class.java).setAction(action).putExtra(EXTRA_OFFER, offerId)
@@ -245,11 +208,10 @@ class OneTouchService : Service() {
         const val EXTRA_OFFER = "offer"
         private const val NOTIF_STATUS = 1
         private const val NOTIF_PROGRESS = 2
-        private const val NOTIF_DONE = 3
         private const val CH_STATUS = "status"
         private const val CH_OFFERS = "offers"
-        private const val CH_TRANSFER = "transfer"
-        private const val CH_DONE = "done"
+        const val CH_TRANSFER = "transfer"
+        const val CH_DONE = "done"
 
         @Volatile var running = false
 

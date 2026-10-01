@@ -61,6 +61,8 @@ object Bus {
     val sending = MutableStateFlow<Uri?>(null)
     val toasts = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val jobs = Channel<SendJob>(Channel.UNLIMITED)
+    /** Name of the desktop our screen is being mirrored to, or null. */
+    val mirroringTo = MutableStateFlow<String?>(null)
 }
 
 object Prefs {
@@ -72,6 +74,15 @@ object Prefs {
         val id = b.joinToString("") { "%02x".format(it) }
         p(ctx).edit().putString("id", id).apply()
         return id
+    }
+
+    /** Secret this phone presents when opening screen sessions (remembered by the Mac). */
+    fun sessionToken(ctx: Context): String {
+        p(ctx).getString("token", null)?.let { return it }
+        val b = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val t = b.joinToString("") { "%02x".format(it) }
+        p(ctx).edit().putString("token", t).apply()
+        return t
     }
 
     fun deviceName(ctx: Context): String =

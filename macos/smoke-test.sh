@@ -49,8 +49,13 @@ echo "✓ PhoneBrowser discovers and resolves the phone"
 echo "--- Go core (CLI) sees:"; "$T/onetouch" peers | tee "$T/peers.txt" || true
 grep -q "Pixel.*android" "$T/peers.txt" && echo "✓ mDNS: the core's discovery finds a phone announced by the system responder"
 head -c 2000000 /dev/urandom > "$T/to-phone.pdf"
-osascript -e "set the clipboard to (POSIX file \"$T/to-phone.pdf\")"
-osascript -e 'clipboard info' 
+for attempt in 1 2 3; do
+  osascript -e "set the clipboard to (POSIX file \"$T/to-phone.pdf\")"
+  sleep 2
+  osascript -e 'clipboard info'
+  grep -q "clipboard changed: .*file-url" "$T/app.log" && break
+  echo "(copy not seen yet, retrying)"
+done
 for i in $(seq 1 20); do [ -s "$T/phone/to-phone.pdf" ] && break; sleep 1; done
 sleep 1
 cmp "$T/to-phone.pdf" "$T/phone/to-phone.pdf" || { echo "phone did not get the file"; cat "$T/phone.log"; exit 1; }

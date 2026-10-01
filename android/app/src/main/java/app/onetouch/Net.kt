@@ -26,7 +26,7 @@ object Net {
         MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
 
     @Synchronized
-    private fun factory(fp: String): SSLSocketFactory = factories.getOrPut(fp) {
+    fun factory(fp: String): SSLSocketFactory = factories.getOrPut(fp) {
         val tm = object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
                 throw CertificateException("client certs not supported")

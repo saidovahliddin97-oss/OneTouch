@@ -50,7 +50,28 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.DesktopMac
+import androidx.compose.material.icons.outlined.Gesture
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Laptop
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.ScreenShare
+import androidx.compose.material.icons.outlined.SyncAlt
+import androidx.compose.material.icons.outlined.WifiOff
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.vector.ImageVector
+import android.app.Activity
+import android.media.projection.MediaProjectionManager
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -83,10 +104,6 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-private val Bg = Color(0xFF0B0D12)
-private val CardBg = Color(0xFF151923)
-private val Accent = Color(0xFF4F8CFF)
-private val Ok = Color(0xFF2FBF71)
 
 /** Fingers must close to 60% of their starting distance to count as a pinch. */
 private const val PINCH_THRESHOLD = 0.6f
@@ -99,7 +116,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         OneTouchService.start(this)
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(primary = Accent, background = Bg, surface = CardBg)) {
+            MaterialTheme(colorScheme = oneTouchColors()) {
                 Screen(resumeTick.intValue)
             }
         }
@@ -153,26 +170,44 @@ private fun Screen(tick: Int) {
     val searching by Bus.searching.collectAsState()
     val sent by Bus.sent.collectAsState()
     val sending by Bus.sending.collectAsState()
+    val mirroringTo by Bus.mirroringTo.collectAsState()
     var viewer by remember { mutableStateOf<MediaItem?>(null) }
+    var tab by rememberSaveable { mutableIntStateOf(0) }
 
     Box(Modifier.fillMaxSize().background(Bg)) {
-        Column(Modifier.fillMaxSize().systemBarsPadding()) {
-            Header(desktop, searching) { OneTouchService.refresh(ctx) }
-            BatteryCard(tick)
-            Text(
-                "🤏 Сведите два пальца на фото — и оно на Mac.\nИли в любой галерее: Поделиться → «На Mac».",
-                color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
-            if (!granted) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Button(onClick = {
-                        launcher.launch(mediaPermissions())
-                        if (!hasMedia(ctx)) ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", ctx.packageName, null)))
-                    }) { Text("Разрешить доступ к фото") }
+        Scaffold(
+            containerColor = Bg,
+            topBar = { Header(desktop, searching) { OneTouchService.refresh(ctx) } },
+            bottomBar = {
+                NavigationBar(containerColor = CardBg) {
+                    NavigationBarItem(
+                        selected = tab == 0, onClick = { tab = 0 },
+                        icon = { Icon(Icons.Outlined.PhotoLibrary, null) }, label = { Text("Файлы") },
+                    )
+                    NavigationBarItem(
+                        selected = tab == 1, onClick = { tab = 1 },
+                        icon = { Icon(Icons.Outlined.ScreenShare, null) }, label = { Text("Экран") },
+                    )
                 }
-            } else {
-                PinchGrid(items, sent, sending, onOpen = { viewer = it }, onPinch = { sendItem(ctx, it) })
+            },
+        ) { pad ->
+            Column(Modifier.fillMaxSize().padding(pad)) {
+                if (tab == 0) {
+                    BatteryCard(tick)
+                    Hint(Icons.Outlined.Gesture, "Сведите два пальца на фото — и оно на ${desktop?.name ?: "Mac"}. Из любой галереи: Поделиться → «На Mac».")
+                    if (!granted) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Button(onClick = {
+                                launcher.launch(mediaPermissions())
+                                if (!hasMedia(ctx)) ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", ctx.packageName, null)))
+                            }) { Text("Разрешить доступ к фото") }
+                        }
+                    } else {
+                        PinchGrid(items, sent, sending, onOpen = { viewer = it }, onPinch = { sendItem(ctx, it) })
+                    }
+                } else {
+                    ScreenTab(desktop, mirroringTo)
+                }
             }
         }
         viewer?.let { item ->
@@ -184,22 +219,102 @@ private fun Screen(tick: Int) {
 
 @Composable
 private fun Header(desktop: Peer?, searching: Boolean, onRefresh: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("OneTouch", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
+    Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(34.dp).clip(RoundedCornerShape(10.dp))
+                .background(Brush.verticalGradient(listOf(Color(0xFF5C94FF), Color(0xFF335CF2)))),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Outlined.SyncAlt, null, tint = Color.White, modifier = Modifier.size(20.dp)) }
+        Spacer(Modifier.width(10.dp))
+        Text("OneTouch", fontSize = 21.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
         Spacer(Modifier.weight(1f))
         val (dot, label) = when {
             desktop != null -> Ok to desktop.name
-            searching -> Color.Gray to "Ищу Mac…"
-            else -> Color(0xFFFF9F43) to "Mac не найден ↻"
+            searching -> Muted to "Ищу Mac…"
+            else -> Warn to "Mac не найден ↻"
         }
         Row(
             Modifier.clip(RoundedCornerShape(99.dp)).background(CardBg).clickable(onClick = onRefresh)
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .padding(horizontal = 12.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
-            Spacer(Modifier.width(8.dp))
-            Text(label, color = Color.White, fontSize = 14.sp)
+            Icon(Icons.Outlined.Laptop, null, tint = Color.White, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(label, color = Color.White, fontSize = 13.sp, maxLines = 1)
+            Spacer(Modifier.width(6.dp))
+            Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+        }
+    }
+}
+
+@Composable
+private fun Hint(icon: ImageVector, text: String) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = Accent, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(text, color = Muted, fontSize = 13.sp, lineHeight = 17.sp)
+    }
+}
+
+@Composable
+private fun ScreenTab(desktop: Peer?, mirroringTo: String?) {
+    val ctx = LocalContext.current
+    val name = desktop?.name ?: "Mac"
+    val projection = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val data = res.data
+        if (res.resultCode == Activity.RESULT_OK && data != null) MirrorService.start(ctx, res.resultCode, data)
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        FeatureCard(
+            icon = Icons.Outlined.DesktopMac,
+            title = "Экран $name на телефоне",
+            text = "Смотрите и управляйте: тап — клик, перетаскивание — выделение, долгое нажатие — правый клик, " +
+                "два пальца — прокрутка, щипок — зум. Выделили файл в Finder — «Забрать», и он уже здесь.",
+            button = "Открыть экран",
+            enabled = desktop != null,
+        ) { ctx.startActivity(Intent(ctx, ScreenActivity::class.java)) }
+
+        FeatureCard(
+            icon = Icons.Outlined.PhoneAndroid,
+            title = if (mirroringTo != null) "Экран транслируется на $mirroringTo" else "Экран телефона на $name",
+            text = "Ваш экран появится в окне на Mac. Перетащите файл в это окно — он сразу окажется в Галерее телефона.",
+            button = if (mirroringTo != null) "Остановить" else "Показать на $name",
+            enabled = desktop != null || mirroringTo != null,
+            active = mirroringTo != null,
+        ) {
+            if (mirroringTo != null) {
+                MirrorService.stop(ctx)
+            } else {
+                projection.launch(ctx.getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
+            }
+        }
+
+        Hint(Icons.Outlined.Info, "В первый раз Mac спросит разрешение. Для управления включите OneTouch на Mac в «Запись экрана» и «Универсальный доступ» (значок ⇄ в строке меню подскажет).")
+        if (desktop == null) Hint(Icons.Outlined.WifiOff, "Mac не найден: запустите OneTouch на Mac в этой же Wi‑Fi сети.")
+    }
+}
+
+@Composable
+private fun FeatureCard(
+    icon: ImageVector, title: String, text: String, button: String,
+    enabled: Boolean, active: Boolean = false, onClick: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = CardBg), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp)) {
+            Box(
+                Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(if (active) Color(0x33FF5D5D) else Color(0x334F8CFF)),
+                contentAlignment = Alignment.Center,
+            ) { Icon(icon, null, tint = if (active) Color(0xFFFF5D5D) else Accent, modifier = Modifier.size(26.dp)) }
+            Spacer(Modifier.size(14.dp))
+            Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.size(6.dp))
+            Text(text, color = Muted, fontSize = 13.sp, lineHeight = 18.sp)
+            Spacer(Modifier.size(14.dp))
+            if (active) {
+                OutlinedButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) { Text(button) }
+            } else {
+                Button(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) { Text(button) }
+            }
         }
     }
 }
@@ -214,8 +329,9 @@ private fun BatteryCard(tick: Int) {
     }
     if (ignoring) return
     Card(
-        colors = CardDefaults.cardColors(containerColor = CardBg),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF2A2214)),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
     ) {
         Column(Modifier.padding(14.dp)) {
             Text("Чтобы файлы с Mac приходили и при выключенном экране, разрешите OneTouch работать в фоне. В простое он не тратит батарею.", color = Color.White, fontSize = 13.sp)
