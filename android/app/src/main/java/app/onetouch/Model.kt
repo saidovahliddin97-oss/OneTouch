@@ -61,6 +61,8 @@ object Bus {
     val sending = MutableStateFlow<Uri?>(null)
     val toasts = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val jobs = Channel<SendJob>(Channel.UNLIMITED)
+    /** Every computer seen in the last full scan (for the device picker). */
+    val desktops = MutableStateFlow<List<Peer>>(emptyList())
     /** Name of the desktop our screen is being mirrored to, or null. */
     val mirroringTo = MutableStateFlow<String?>(null)
 }
@@ -90,7 +92,15 @@ object Prefs {
             ?: Build.MODEL
 
     fun desktop(ctx: Context): Peer? = p(ctx).getString("desktop", null)?.let(Peer::fromJson)
-    fun saveDesktop(ctx: Context, peer: Peer) = p(ctx).edit().putString("desktop", peer.toJson()).apply()
+
+    fun saveDesktop(ctx: Context, peer: Peer) {
+        val known = JSONObject(p(ctx).getString("known", "{}") ?: "{}").put(peer.id, peer.fp)
+        p(ctx).edit().putString("desktop", peer.toJson()).putString("known", known.toString()).apply()
+    }
+
+    /** Computers this phone has worked with (id → certificate fingerprint). */
+    fun isKnownDesktop(ctx: Context, id: String, fp: String): Boolean =
+        JSONObject(p(ctx).getString("known", "{}") ?: "{}").optString(id).equals(fp, ignoreCase = true) && fp.isNotEmpty()
 }
 
 fun humanBytes(n: Long): String {

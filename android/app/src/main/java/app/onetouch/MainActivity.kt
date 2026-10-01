@@ -64,6 +64,15 @@ import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.ScreenShare
 import androidx.compose.material.icons.outlined.SyncAlt
 import androidx.compose.material.icons.outlined.WifiOff
+import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.DesktopWindows
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.TouchApp
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Switch
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -194,7 +203,7 @@ private fun Screen(tick: Int) {
             Column(Modifier.fillMaxSize().padding(pad)) {
                 if (tab == 0) {
                     BatteryCard(tick)
-                    Hint(Icons.Outlined.Gesture, "Сведите два пальца на фото — и оно на ${desktop?.name ?: "Mac"}. Из любой галереи: Поделиться → «На Mac».")
+                    Hint(Icons.Outlined.Gesture, "Сведите два пальца на фото — и оно на ${desktop?.name ?: "Mac"}. Из любого приложения: Поделиться → «На Mac» или плавающая кнопка OneTouch.")
                     if (!granted) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Button(onClick = {
@@ -219,6 +228,9 @@ private fun Screen(tick: Int) {
 
 @Composable
 private fun Header(desktop: Peer?, searching: Boolean, onRefresh: () -> Unit) {
+    val ctx = LocalContext.current
+    val desktops by Bus.desktops.collectAsState()
+    var menu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier.size(34.dp).clip(RoundedCornerShape(10.dp))
@@ -230,19 +242,40 @@ private fun Header(desktop: Peer?, searching: Boolean, onRefresh: () -> Unit) {
         Spacer(Modifier.weight(1f))
         val (dot, label) = when {
             desktop != null -> Ok to desktop.name
-            searching -> Muted to "Ищу Mac…"
-            else -> Warn to "Mac не найден ↻"
+            searching -> Muted to "Ищу…"
+            else -> Warn to "Компьютер не найден"
         }
-        Row(
-            Modifier.clip(RoundedCornerShape(99.dp)).background(CardBg).clickable(onClick = onRefresh)
-                .padding(horizontal = 12.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Outlined.Laptop, null, tint = Color.White, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(label, color = Color.White, fontSize = 13.sp, maxLines = 1)
-            Spacer(Modifier.width(6.dp))
-            Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+        Box {
+            Row(
+                Modifier.clip(RoundedCornerShape(99.dp)).background(CardBg)
+                    .clickable { menu = true; OneTouchService.scan(ctx) }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Outlined.Laptop, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(label, color = Color.White, fontSize = 13.sp, maxLines = 1, modifier = Modifier.widthIn(max = 150.dp))
+                Spacer(Modifier.width(6.dp))
+                Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+                Icon(Icons.Outlined.ArrowDropDown, null, tint = Muted, modifier = Modifier.size(18.dp))
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = CardBg2) {
+                Text("Куда отправлять", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+                val list = (desktops + listOfNotNull(desktop)).distinctBy { it.id }
+                list.forEach { p ->
+                    DropdownMenuItem(
+                        text = { Text(p.name) },
+                        leadingIcon = { Icon(if (p.os == "windows") Icons.Outlined.DesktopWindows else Icons.Outlined.Laptop, null) },
+                        trailingIcon = { if (p.id == desktop?.id) Icon(Icons.Outlined.Check, null, tint = Accent) },
+                        onClick = { OneTouchService.select(ctx, p); menu = false },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text(if (searching) "Ищу компьютеры…" else "Обновить список") },
+                    leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
+                    onClick = { OneTouchService.scan(ctx); onRefresh() },
+                )
+            }
         }
     }
 }
@@ -289,8 +322,65 @@ private fun ScreenTab(desktop: Peer?, mirroringTo: String?) {
             }
         }
 
+        ControlCard()
+
         Hint(Icons.Outlined.Info, "В первый раз Mac спросит разрешение. Для управления включите OneTouch на Mac в «Запись экрана» и «Универсальный доступ» (значок ⇄ в строке меню подскажет).")
         if (desktop == null) Hint(Icons.Outlined.WifiOff, "Mac не найден: запустите OneTouch на Mac в этой же Wi‑Fi сети.")
+    }
+}
+
+/** Accessibility service: control from the Mac + floating button over any app. */
+@Composable
+private fun ControlCard() {
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("onetouch", Context.MODE_PRIVATE) }
+    var tick by remember { mutableIntStateOf(0) }
+    val enabled = remember(tick) { ControlService.isEnabled(ctx) }
+    var bubble by remember { mutableStateOf(prefs.getBoolean("bubble", true)) }
+    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(2000); tick++ } }
+    Card(colors = CardDefaults.cardColors(containerColor = CardBg), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(Color(0x334F8CFF)),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Outlined.TouchApp, null, tint = Accent, modifier = Modifier.size(26.dp)) }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Управление и плавающая кнопка", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Text(if (enabled) "Включено" else "Выключено", color = if (enabled) Ok else Warn, fontSize = 13.sp)
+                }
+            }
+            Spacer(Modifier.size(10.dp))
+            Text(
+                "• Управляйте телефоном мышью и клавиатурой Mac во время трансляции.\n" +
+                    "• Кнопка OneTouch поверх любых приложений: нажали — снимок экрана на компьютер, удержали — последнее фото.",
+                color = Muted, fontSize = 13.sp, lineHeight = 18.sp,
+            )
+            Spacer(Modifier.size(12.dp))
+            if (!enabled) {
+                Button(onClick = { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Включить: Спец. возможности → OneTouch — управление")
+                }
+                Spacer(Modifier.size(6.dp))
+                Text(
+                    "Если переключатель серый: Настройки → Приложения → OneTouch → ⋮ (вверху справа) → «Разрешить ограниченные настройки», затем снова сюда.",
+                    color = Muted, fontSize = 12.sp, lineHeight = 16.sp,
+                )
+                TextButton(onClick = {
+                    ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", ctx.packageName, null)))
+                }) { Text("Открыть настройки OneTouch") }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Плавающая кнопка", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Switch(checked = bubble, onCheckedChange = {
+                        bubble = it
+                        prefs.edit().putBoolean("bubble", it).apply()
+                        ControlService.instance?.showBubble(it)
+                    })
+                }
+            }
+        }
     }
 }
 

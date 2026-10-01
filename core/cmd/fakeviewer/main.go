@@ -180,7 +180,16 @@ func mirror(addr, record string) error {
 		return err
 	}
 	defer c.Close()
-	go io.Copy(io.Discard, r)
+	// Print what the desktop sends back (input events from clicks in its window).
+	go func() {
+		for {
+			t, p, err := readFrame(r)
+			if err != nil {
+				return
+			}
+			fmt.Printf("got frame %d: %s\n", t, p)
+		}
+	}()
 	in := bytes.NewReader(data)
 	n := 0
 	for {
@@ -196,7 +205,7 @@ func mirror(addr, record string) error {
 			time.Sleep(66 * time.Millisecond)
 		}
 	}
-	time.Sleep(2 * time.Second)
 	fmt.Printf("✓ mirror: sent %d frames\n", n)
+	time.Sleep(8 * time.Second) // keep the window open for input tests
 	return nil
 }

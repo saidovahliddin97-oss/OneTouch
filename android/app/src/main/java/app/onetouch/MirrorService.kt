@@ -118,8 +118,21 @@ class MirrorService : Service() {
             while (!stopped) {
                 val (type, p) = s.read()
                 when (type) {
-                    Session.COMMAND -> if (JSONObject(String(p)).optString("cmd") == "keyframe") {
-                        encoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+                    Session.INPUT -> {
+                        val ctl = ControlService.instance
+                        if (ctl != null) {
+                            Handler(Looper.getMainLooper()).post { ctl.handle(JSONObject(String(p))) }
+                        } else {
+                            askForControl(s)
+                        }
+                    }
+                    Session.COMMAND -> when (JSONObject(String(p)).optString("cmd")) {
+                        "keyframe" -> encoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+                        "screenshot" -> {
+                            val ctl = ControlService.instance
+                            if (ctl != null) Handler(Looper.getMainLooper()).post { ctl.screenshotToDesktop() } else askForControl(s)
+                        }
+                        "pick" -> openPicker()
                     }
                     Session.OFFER -> {
                         val offer = Offer.parse(String(p), peer.host)
@@ -133,6 +146,32 @@ class MirrorService : Service() {
             }
         } catch (_: Exception) {
             if (!stopped) Handler(Looper.getMainLooper()).post { stopSelf() }
+        }
+    }
+
+    private var askedForControl = false
+
+    /** Control needs the accessibility service; tell the Mac once, and nudge the user here. */
+    private fun askForControl(s: Session) {
+        if (askedForControl) return
+        askedForControl = true
+        runCatching {
+            s.json(Session.STATUS, JSONObject().put("text",
+                "Чтобы управлять телефоном с Mac, включите на телефоне: Настройки → Спец. возможности → OneTouch — управление"))
+        }
+        Bus.toasts.tryEmit("Включите «OneTouch — управление» в Спец. возможностях")
+    }
+
+    /** Shows the system file picker on the phone (visible in the Mac window). */
+    private fun openPicker() {
+        val i = Intent(this, PickActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            startActivity(i) // allowed: our accessibility service / projection makes this a visible-UI app
+        } catch (e: Exception) {
+            val pi = PendingIntent.getActivity(this, 9, i, PendingIntent.FLAG_IMMUTABLE)
+            getSystemService(android.app.NotificationManager::class.java).notify(21,
+                Notification.Builder(this, OneTouchService.CH_DONE).setSmallIcon(R.drawable.ic_tile)
+                    .setContentTitle("Выберите файл для Mac").setContentIntent(pi).setAutoCancel(true).build())
         }
     }
 

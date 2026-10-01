@@ -13,7 +13,7 @@ import kotlin.concurrent.thread
  * receives small JSON metadata; the files themselves are pulled over pinned
  * TLS after the user taps «Получить». Idle cost: one thread blocked in accept().
  */
-class OfferServer(private val onOffer: (Offer) -> Unit) {
+class OfferServer(private val onOffer: (Offer) -> Unit, private val onPull: (Peer) -> Unit) {
     private var socket: ServerSocket? = null
     val port: Int get() = socket?.localPort ?: 0
 
@@ -47,7 +47,8 @@ class OfferServer(private val onOffer: (Offer) -> Unit) {
             }
         }
         val parts = request.split(" ")
-        if (parts.size < 2 || parts[0] != "POST" || !parts[1].startsWith("/v1/offer")) {
+        val path = parts.getOrNull(1).orEmpty()
+        if (parts.size < 2 || parts[0] != "POST" || !(path.startsWith("/v1/offer") || path.startsWith("/v1/pull"))) {
             respond(c, 404, "{\"error\":\"not found\"}")
             return
         }
@@ -63,6 +64,19 @@ class OfferServer(private val onOffer: (Offer) -> Unit) {
             off += n
         }
         val host = c.inetAddress.hostAddress ?: return
+        if (path.startsWith("/v1/pull")) {
+            // A desktop asks for our newest photo (pinch out on its trackpad).
+            val peer = try {
+                val o = org.json.JSONObject(String(body, Charsets.UTF_8))
+                Peer(o.getString("fromId"), o.optString("from", "Mac"), "darwin", o.getString("fp"), host, o.getInt("port"))
+            } catch (e: Exception) {
+                respond(c, 400, "{\"error\":\"bad request\"}")
+                return
+            }
+            respond(c, 200, "{}")
+            onPull(peer)
+            return
+        }
         val offer = try {
             Offer.parse(String(body, Charsets.UTF_8), host)
         } catch (e: Exception) {

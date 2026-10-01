@@ -33,7 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
 class OneTouchService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var discovery: Discovery
-    private val server = OfferServer(::onOffer)
+    private val server = OfferServer(::onOffer, ::onPull)
     private val offers = ConcurrentHashMap<String, Offer>()
     private val findLock = Mutex()
     private lateinit var nm: NotificationManager
@@ -59,6 +59,7 @@ class OneTouchService : Service() {
         goForeground()
         when (intent?.action) {
             ACTION_REFRESH -> scope.launch { ensureDesktop(force = true) }
+            ACTION_SCAN -> scope.launch { scanAll() }
             ACTION_ACCEPT -> intent.getStringExtra(EXTRA_OFFER)?.let { id -> scope.launch { accept(id) } }
             ACTION_DECLINE -> intent.getStringExtra(EXTRA_OFFER)?.let { id ->
                 offers.remove(id)
@@ -108,6 +109,16 @@ class OneTouchService : Service() {
         }
     }
 
+    /** Full scan for the device picker: every computer on the network. */
+    private suspend fun scanAll() = findLock.withLock {
+        Bus.searching.value = true
+        try {
+            Bus.desktops.value = discovery.findDesktops(Prefs.deviceId(this), 3500, preferId = null, all = true)
+        } finally {
+            Bus.searching.value = false
+        }
+    }
+
     private fun setDesktop(p: Peer?): Peer? {
         Bus.desktop.value = p
         if (p != null) Prefs.saveDesktop(this, p)
@@ -137,6 +148,30 @@ class OneTouchService : Service() {
         } finally {
             Bus.sending.value = null
             nm.cancel(nid)
+        }
+    }
+
+    // ---- desktop asks for our latest photo ----
+
+    private fun onPull(peer: Peer) {
+        // Only computers this phone already works with may ask for its photos.
+        if (!Prefs.isKnownDesktop(this, peer.id, peer.fp)) {
+            Bus.toasts.tryEmit("Отклонён запрос фото от незнакомого компьютера «${peer.name}»")
+            return
+        }
+        scope.launch {
+            val latest = runCatching { Media.recent(this@OneTouchService, 1).firstOrNull() }.getOrNull()
+            if (latest == null) {
+                Bus.toasts.tryEmit("Нет доступа к фото: откройте OneTouch и разрешите доступ")
+                return@launch
+            }
+            val job = Media.job(this@OneTouchService, latest.uri)
+            try {
+                Net.upload(peer, job, Prefs.deviceName(this@OneTouchService)) { _, _ -> }
+                Bus.toasts.tryEmit("✓ ${job.name} → ${peer.name}")
+            } catch (e: Exception) {
+                Bus.toasts.tryEmit("Не отправилось на ${peer.name}: ${e.message}")
+            }
         }
     }
 
@@ -203,6 +238,7 @@ class OneTouchService : Service() {
 
     companion object {
         const val ACTION_REFRESH = "app.onetouch.REFRESH"
+        const val ACTION_SCAN = "app.onetouch.SCAN"
         const val ACTION_ACCEPT = "app.onetouch.ACCEPT"
         const val ACTION_DECLINE = "app.onetouch.DECLINE"
         const val EXTRA_OFFER = "offer"
@@ -230,6 +266,14 @@ class OneTouchService : Service() {
         fun start(ctx: Context) = launch(ctx, Intent(ctx, OneTouchService::class.java))
 
         fun refresh(ctx: Context) = launch(ctx, Intent(ctx, OneTouchService::class.java).setAction(ACTION_REFRESH))
+
+        fun scan(ctx: Context) = launch(ctx, Intent(ctx, OneTouchService::class.java).setAction(ACTION_SCAN))
+
+        /** The user picked a computer: it becomes the target for everything. */
+        fun select(ctx: Context, peer: Peer) {
+            Prefs.saveDesktop(ctx, peer)
+            Bus.desktop.value = peer
+        }
 
         /** Queues files and makes sure the service is up to send them. */
         fun send(ctx: Context, jobs: List<SendJob>) {

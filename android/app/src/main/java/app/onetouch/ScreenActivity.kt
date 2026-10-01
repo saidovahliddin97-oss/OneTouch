@@ -1,6 +1,9 @@
 package app.onetouch
 
+import android.app.PictureInPictureParams
+import android.content.res.Configuration
 import android.graphics.SurfaceTexture
+import android.util.Rational
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
@@ -43,6 +46,15 @@ import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.ZoomOutMap
+import androidx.compose.material.icons.outlined.BatterySaver
+import androidx.compose.material.icons.outlined.HelpOutline
+import androidx.compose.material.icons.outlined.HighQuality
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.Mouse
+import androidx.compose.material.icons.outlined.PictureInPicture
+import androidx.compose.material.icons.outlined.TouchApp
+import androidx.compose.material.icons.outlined.UploadFile
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -117,10 +129,32 @@ class ScreenActivity : ComponentActivity() {
                     },
                     onSurfaceGone = { client?.stop(); client = null },
                     send = { t, o -> client?.send(t, o) },
+                    onPip = { enterPip() },
                     onClose = { finish() },
                 )
             }
         }
+    }
+
+    /** Keeps the Mac in a small floating window while you use other apps. */
+    private fun enterPip() {
+        val r = Rational(ui.videoW.coerceAtLeast(1), ui.videoH.coerceAtLeast(1))
+        val clamped = when {
+            r.toFloat() > 2.39f -> Rational(239, 100)
+            r.toFloat() < 0.42f -> Rational(42, 100)
+            else -> r
+        }
+        runCatching { enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(clamped).build()) }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (ui.connected) enterPip() // Home during a session → shrink instead of disconnecting
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        ui.pip = isInPictureInPictureMode
     }
 
     override fun onDestroy() {
@@ -137,6 +171,7 @@ class ScreenUi {
     var control by mutableStateOf(true)
     var status by mutableStateOf<String?>(null)
     var error by mutableStateOf<String?>(null)
+    var pip by mutableStateOf(false)
 }
 
 /** Network + decoder thread for one screen session. */
@@ -267,22 +302,42 @@ private fun ScreenView(
     onSurface: (Surface) -> Unit,
     onSurfaceGone: () -> Unit,
     send: (Int, JSONObject) -> Unit,
+    onPip: () -> Unit,
     onClose: () -> Unit,
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("onetouch", android.content.Context.MODE_PRIVATE) }
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var keyboard by remember { mutableStateOf(false) }
+    var toolbar by remember { mutableStateOf(true) }
+    var toolbarTick by remember { mutableIntStateOf(0) }
+    var trackpad by remember { mutableStateOf(prefs.getBoolean("trackpad", false)) }
+    var economy by remember { mutableStateOf(prefs.getBoolean("economy", false)) }
+    var help by remember { mutableStateOf(!prefs.getBoolean("screenHelp", false)) }
     val send by rememberUpdatedState(send)
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
         if (uris.isNotEmpty()) {
             OneTouchService.send(ctx, uris.map { Media.job(ctx, it) })
-            ui.status = "Отправляю на $peerName… (появится на рабочем столе и в буфере ⌘V)"
+            ui.status = "Отправляю на $peerName… (рабочий стол и буфер — ⌘V)"
+        }
+    }
+    val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            OneTouchService.send(ctx, uris.map { Media.job(ctx, it) })
+            ui.status = "Отправляю ${uris.size} файл(ов) на $peerName…"
         }
     }
 
     LaunchedEffect(ui.status) {
         if (ui.status != null) { delay(4500); ui.status = null }
+    }
+    // The toolbar tucks itself away so the whole screen is the Mac.
+    LaunchedEffect(toolbar, toolbarTick, keyboard) {
+        if (toolbar && !keyboard) { delay(4000); toolbar = false }
+    }
+    LaunchedEffect(ui.connected, economy) {
+        if (ui.connected) send(Session.COMMAND, JSONObject().put("cmd", "quality").put("bitrate", if (economy) 2_500_000 else 8_000_000))
     }
 
     BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
@@ -293,6 +348,7 @@ private fun ScreenView(
         val (vw, vh) = if (boxW / boxH > aspect) boxH * aspect to boxH else boxW to boxW / aspect
         val left = (boxW - vw) / 2
         val top = (boxH - vh) / 2
+        val pxPerPoint = density.density / 1.8f // touchpad speed: finger pixels → Mac points
 
         // Screen point → normalized Mac coordinates, undoing the local zoom/pan.
         fun toMac(p: Offset): Pair<Double, Double> {
@@ -305,6 +361,8 @@ private fun ScreenView(
             val (x, y) = toMac(p)
             send(Session.INPUT, JSONObject().put("t", t).put("x", x).put("y", y))
         }
+        fun here(t: String) = send(Session.INPUT, JSONObject().put("t", t))
+        fun rel(d: Offset) = send(Session.INPUT, JSONObject().put("t", "rel").put("dx", (d.x / pxPerPoint).toDouble()).put("dy", (d.y / pxPerPoint).toDouble()))
         fun clampPan(o: Offset): Offset {
             val mx = vw * (zoom - 1) / 2; val my = vh * (zoom - 1) / 2
             return Offset(o.x.coerceIn(-mx, mx), o.y.coerceIn(-my, my))
@@ -327,33 +385,34 @@ private fun ScreenView(
                 .graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = pan.x; translationY = pan.y },
         )
 
-        // Gesture layer over the whole screen.
+        // Gestures. Touch mode: the finger is the cursor. Touchpad mode: the phone is a trackpad.
         Box(
-            Modifier.fillMaxSize().pointerInput(vw, vh) {
+            Modifier.fillMaxSize().pointerInput(vw, vh, trackpad) {
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     val start = down.position
+                    var last = start
+                    var moved = false
                     var dragging = false
                     var longPressed = false
                     var multi = false
+                    var multiMoved = 0f
+                    val multiStart = System.currentTimeMillis()
                     var prevCentroid = Offset.Unspecified
                     var prevDist = 0f
-                    var lastMove = 0L
+                    var lastSent = 0L
+                    var pending = Offset.Zero
                     val slop = viewConfiguration.touchSlop
                     while (true) {
-                        val ev = if (!dragging && !multi && !longPressed) {
-                            withTimeoutOrNull(550) { awaitPointerEvent() }
-                        } else {
-                            awaitPointerEvent()
-                        }
-                        if (ev == null) { // long press → right click
+                        val ev = if (!moved && !multi && !longPressed) withTimeoutOrNull(550) { awaitPointerEvent() } else awaitPointerEvent()
+                        if (ev == null) { // held still
                             longPressed = true
-                            input("right", start)
+                            if (!trackpad) input("right", start)
                             continue
                         }
                         val pressed = ev.changes.filter { it.pressed }
                         if (pressed.size >= 2) {
-                            if (dragging) { input("up", pressed[0].position); dragging = false }
+                            if (dragging) { if (trackpad) here("upHere") else input("up", pressed[0].position); dragging = false }
                             multi = true
                             val a = pressed[0].position; val b = pressed[1].position
                             val centroid = (a + b) / 2f
@@ -362,6 +421,7 @@ private fun ScreenView(
                                 val ratio = dist / prevDist
                                 if (abs(ratio - 1f) > 0.004f) zoom = (zoom * ratio).coerceIn(1f, 5f)
                                 val d = centroid - prevCentroid
+                                multiMoved += d.getDistance() + abs(dist - prevDist)
                                 if (zoom > 1.01f) {
                                     pan = clampPan(pan + d)
                                 } else {
@@ -377,81 +437,180 @@ private fun ScreenView(
                             continue
                         }
                         if (multi) {
-                            if (pressed.isEmpty()) break
+                            if (pressed.isEmpty()) {
+                                // Two-finger tap = right click.
+                                if (multiMoved < slop && System.currentTimeMillis() - multiStart < 300) {
+                                    if (trackpad) here("rightHere") else input("right", start)
+                                }
+                                break
+                            }
                             prevCentroid = Offset.Unspecified
                             continue
                         }
                         val c = ev.changes.first()
                         if (!c.pressed) {
-                            when {
-                                longPressed -> {}
-                                dragging -> input("up", c.position)
-                                else -> { input("move", start); input("down", start); input("up", start) }
+                            if (trackpad) {
+                                when {
+                                    dragging -> { if (pending != Offset.Zero) rel(pending); here("upHere") }
+                                    longPressed && !moved -> here("rightHere")
+                                    !moved -> here("clickHere")
+                                }
+                            } else {
+                                when {
+                                    longPressed && !dragging -> {}
+                                    dragging -> input("up", c.position)
+                                    else -> { input("move", start); input("down", start); input("up", start) }
+                                }
                             }
                             break
                         }
-                        if (!dragging && !longPressed && (c.position - start).getDistance() > slop) {
-                            dragging = true
-                            input("move", start)
-                            input("down", start)
+                        if (!moved && (c.position - start).getDistance() > slop) {
+                            moved = true
+                            if (trackpad) {
+                                if (longPressed) { here("downHere"); dragging = true } // hold, then move = drag
+                            } else if (!longPressed) {
+                                dragging = true
+                                input("move", start)
+                                input("down", start)
+                            }
                         }
-                        if (dragging) {
+                        if (moved) {
                             val now = System.currentTimeMillis()
-                            if (now - lastMove >= 16) { lastMove = now; input("move", c.position) }
+                            if (trackpad) {
+                                pending += c.position - last
+                                if (now - lastSent >= 16) { lastSent = now; rel(pending); pending = Offset.Zero }
+                            } else if (dragging && now - lastSent >= 16) {
+                                lastSent = now
+                                input("move", c.position)
+                            }
                         }
+                        last = c.position
                         c.consume()
                     }
                 }
             },
         )
 
-        // Top toolbar.
-        Row(
-            Modifier.align(Alignment.TopCenter).padding(top = 10.dp)
-                .clip(RoundedCornerShape(99.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 6.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            ToolButton(Icons.Outlined.Close, "Закрыть", onClose)
-            Text(peerName, color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 8.dp))
-            ToolButton(Icons.Outlined.Keyboard, "Клавиатура") { keyboard = !keyboard }
-            ToolButton(Icons.Outlined.CloudDownload, "Забрать") {
-                send(Session.COMMAND, JSONObject().put("cmd", "grab"))
-                ui.status = "Забираю файлы, выделенные в Finder…"
+        if (!ui.pip) {
+            // Toolbar, or the small tab that brings it back.
+            if (toolbar) {
+                Row(
+                    Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                        .clip(RoundedCornerShape(99.dp)).background(Color.Black.copy(alpha = 0.6f))
+                        .horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    fun used() { toolbarTick++ }
+                    ToolButton(Icons.Outlined.Close, "Выход", onClose)
+                    ToolButton(Icons.Outlined.PictureInPicture, "Свернуть") { onPip() }
+                    ToolButton(Icons.Outlined.Keyboard, "Клавиатура") { keyboard = !keyboard; used() }
+                    ToolButton(if (trackpad) Icons.Outlined.Mouse else Icons.Outlined.TouchApp, if (trackpad) "Тачпад" else "Касание") {
+                        trackpad = !trackpad
+                        prefs.edit().putBoolean("trackpad", trackpad).apply()
+                        ui.status = if (trackpad) "Тачпад: водите пальцем — курсор, тап — клик, удержать и вести — перетащить"
+                        else "Касание: куда нажали — туда и клик"
+                        used()
+                    }
+                    ToolButton(Icons.Outlined.CloudDownload, "Забрать") {
+                        send(Session.COMMAND, JSONObject().put("cmd", "grab"))
+                        ui.status = "Забираю файлы, выделенные в Finder…"
+                        used()
+                    }
+                    ToolButton(Icons.Outlined.PhotoLibrary, "Фото на Mac") {
+                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)); used()
+                    }
+                    ToolButton(Icons.Outlined.UploadFile, "Файл на Mac") { files.launch(arrayOf("*/*")); used() }
+                    ToolButton(if (economy) Icons.Outlined.BatterySaver else Icons.Outlined.HighQuality, if (economy) "Эконом" else "HD") {
+                        economy = !economy
+                        prefs.edit().putBoolean("economy", economy).apply()
+                        used()
+                    }
+                    ToolButton(Icons.Outlined.HelpOutline, "Жесты") { help = true; used() }
+                    if (zoom > 1.01f) ToolButton(Icons.Outlined.ZoomOutMap, "1:1") { zoom = 1f; pan = Offset.Zero; used() }
+                }
+            } else {
+                Surface(
+                    onClick = { toolbar = true },
+                    shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp),
+                    color = Color.Black.copy(alpha = 0.55f),
+                    modifier = Modifier.align(Alignment.TopCenter),
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.KeyboardArrowDown, "Меню", tint = Color.White, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(peerName, color = Color.White, fontSize = 11.sp)
+                    }
+                }
             }
-            ToolButton(Icons.Outlined.PhotoLibrary, "На Mac") {
-                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-            }
-            if (zoom > 1.01f) ToolButton(Icons.Outlined.ZoomOutMap, "1:1") { zoom = 1f; pan = Offset.Zero }
-        }
 
-        if (keyboard) {
-            KeyboardBar(
-                Modifier.align(Alignment.BottomCenter),
-                onKey = { k -> send(Session.INPUT, JSONObject().put("t", "key").put("k", k)) },
-                onText = { s -> send(Session.INPUT, JSONObject().put("t", "text").put("s", s)) },
-            )
-        }
+            if (keyboard) {
+                KeyboardBar(
+                    Modifier.align(Alignment.BottomCenter),
+                    onKey = { k -> send(Session.INPUT, JSONObject().put("t", "key").put("k", k)) },
+                    onText = { s -> send(Session.INPUT, JSONObject().put("t", "text").put("s", s)) },
+                )
+            }
 
-        // Connection state / messages.
-        when {
-            ui.error != null -> Message(Modifier.align(Alignment.Center), ui.error!!, action = "Закрыть", onAction = onClose)
-            !ui.connected || ui.videoW == 16 -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator()
-                Spacer(Modifier.size(12.dp))
-                Text("Подключаюсь к $peerName…\nНа Mac может появиться запрос — нажмите «Разрешить».",
-                    color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            when {
+                ui.error != null -> Message(Modifier.align(Alignment.Center), ui.error!!, action = "Закрыть", onAction = onClose)
+                !ui.connected || ui.videoW == 16 -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.size(12.dp))
+                    Text("Подключаюсь к $peerName…\nНа Mac может появиться запрос — нажмите «Разрешить».",
+                        color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                }
+            }
+            AnimatedVisibility(ui.status != null, Modifier.align(Alignment.BottomCenter).padding(bottom = if (keyboard) 70.dp else 20.dp),
+                enter = fadeIn(), exit = fadeOut()) {
+                Surface(shape = RoundedCornerShape(12.dp), color = Color(0xEE151923)) {
+                    Text(ui.status.orEmpty(), color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                }
+            }
+            if (!ui.control && ui.connected) {
+                Text("Только просмотр — разрешите управление на Mac", color = Color(0xFFFFB86B), fontSize = 12.sp,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(12.dp))
+            }
+            if (help && ui.connected) {
+                GestureHelp(Modifier.align(Alignment.Center), trackpad) {
+                    help = false
+                    prefs.edit().putBoolean("screenHelp", true).apply()
+                }
             }
         }
-        AnimatedVisibility(ui.status != null, Modifier.align(Alignment.BottomCenter).padding(bottom = if (keyboard) 70.dp else 20.dp),
-            enter = fadeIn(), exit = fadeOut()) {
-            Surface(shape = RoundedCornerShape(12.dp), color = Color(0xEE151923)) {
-                Text(ui.status.orEmpty(), color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+    }
+}
+
+@Composable
+private fun GestureHelp(modifier: Modifier, trackpad: Boolean, onDone: () -> Unit) {
+    val rows = if (trackpad) listOf(
+        "Водите пальцем" to "двигать курсор",
+        "Тап" to "клик (два тапа — двойной клик)",
+        "Удержать и вести" to "перетащить / выделить",
+        "Удержать" to "правый клик",
+        "Тап двумя пальцами" to "правый клик",
+        "Два пальца" to "прокрутка · щипок — зум",
+    ) else listOf(
+        "Тап" to "клик в этом месте",
+        "Два тапа" to "двойной клик",
+        "Провести" to "перетащить / выделить рамкой",
+        "Удержать" to "правый клик",
+        "Два пальца" to "прокрутка · щипок — зум",
+    )
+    Surface(modifier.padding(24.dp), shape = RoundedCornerShape(20.dp), color = Color(0xF2151923)) {
+        Column(Modifier.padding(20.dp)) {
+            Text(if (trackpad) "Режим «Тачпад»" else "Режим «Касание»", color = Color.White, fontSize = 17.sp)
+            Spacer(Modifier.size(10.dp))
+            rows.forEach { (g, a) ->
+                Row(Modifier.padding(vertical = 3.dp)) {
+                    Text(g, color = Accent, fontSize = 13.sp, modifier = Modifier.width(170.dp))
+                    Text(a, color = Color.White, fontSize = 13.sp)
+                }
             }
-        }
-        if (!ui.control && ui.connected) {
-            Text("Только просмотр — разрешите управление на Mac", color = Color(0xFFFFB86B), fontSize = 12.sp,
-                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp))
+            Spacer(Modifier.size(8.dp))
+            Text("Меню прячется само — потяните за язычок сверху. «Свернуть» оставит Mac в маленьком окне поверх других приложений.",
+                color = Muted, fontSize = 12.sp)
+            Spacer(Modifier.size(12.dp))
+            FilledTonalButton(onClick = onDone) { Text("Понятно") }
         }
     }
 }

@@ -53,7 +53,7 @@ class Discovery(private val ctx: Context) {
      * Looks for desktop nodes for up to [timeoutMs]. Returns early once the
      * desktop with [preferId] (or, if null, any desktop) has been resolved.
      */
-    suspend fun findDesktops(selfId: String, timeoutMs: Long, preferId: String?): List<Peer> {
+    suspend fun findDesktops(selfId: String, timeoutMs: Long, preferId: String?, all: Boolean = false): List<Peer> {
         val wifi = ctx.applicationContext.getSystemService(WifiManager::class.java)
         val lock = wifi.createMulticastLock("onetouch").apply { setReferenceCounted(false); acquire() }
         val found = Channel<NsdServiceInfo>(Channel.UNLIMITED)
@@ -73,7 +73,7 @@ class Discovery(private val ctx: Context) {
                     val p = resolve(s)?.let(::toPeer) ?: continue
                     if (p.id == selfId || p.fp.isEmpty() || peers.any { it.id == p.id }) continue
                     peers += p
-                    if (preferId == null || p.id == preferId) break
+                    if (!all && (preferId == null || p.id == preferId)) break
                 }
             }
         } finally {

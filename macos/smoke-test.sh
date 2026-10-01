@@ -64,8 +64,27 @@ echo "✓ ⌘C on a file → offer → phone downloaded it over pinned TLS"
 # Screen Recording), sends input, and grabs the Finder selection mid-session.
 "$T/fakeviewer" screen 127.0.0.1:47470 "$T/rec.bin" "$T/grab.bin"
 grep -q "input .*move" "$T/app.log" && echo "✓ input events reach the Mac"
-# Mirror: replay the recorded H.264 as the phone's screen; the Mac must decode it.
-"$T/fakeviewer" mirror 127.0.0.1:47470 "$T/rec.bin"
+# Mirror: replay the recorded H.264 as the phone's screen; the Mac must decode it,
+# and a click in the window must reach the phone as a tap.
+cat > "$T/click.swift" <<'SWIFT'
+import CoreGraphics
+import Foundation
+let b = CGDisplayBounds(CGMainDisplayID())
+let p = CGPoint(x: b.midX, y: b.midY)
+for t in [CGEventType.leftMouseDown, .leftMouseUp] {
+    CGEvent(mouseEventSource: nil, mouseType: t, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+    usleep(60_000)
+}
+SWIFT
+swiftc -O "$T/click.swift" -o "$T/click"
+"$T/fakeviewer" mirror 127.0.0.1:47470 "$T/rec.bin" > "$T/mirror.log" 2>&1 &
+MIRROR_PID=$!
+sleep 6
+"$T/click"
+wait $MIRROR_PID || true
+cat "$T/mirror.log"
 grep -q "30 frames decoded, layer=ok" "$T/app.log" || { echo "mirror window did not decode the stream"; exit 1; }
 echo "✓ mirror: phone screen decoded in a Mac window"
+grep -q 'got frame 16: .*"t":"tap"' "$T/mirror.log" && echo "✓ mirror: a click in the Mac window reaches the phone as a tap" \
+  || { echo "click in the mirror window did not reach the phone"; exit 1; }
 echo "ALL SMOKE TESTS PASSED"
