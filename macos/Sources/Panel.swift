@@ -168,7 +168,7 @@ struct PanelView: View {
             Toggle("⌘C на файле — предложить телефону", isOn: $state.offerOnCopy)
             Toggle("Щипки в Finder: свести — на телефон, развести — фото с телефона", isOn: $state.pinch)
             Toggle("Полученное — сразу в буфер (⌘V)", isOn: $state.toClipboard)
-            Toggle("Запускать при входе", isOn: $state.launchAtLogin)
+            Toggle("Работать в фоне и запускаться при входе", isOn: $state.launchAtLogin)
         }
         .toggleStyle(.switch)
         .controlSize(.mini)

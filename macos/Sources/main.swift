@@ -7,7 +7,7 @@ import UserNotifications
 ///  • phone → Mac: files land on the Desktop and in the clipboard (⌘V);
 ///  • Mac → phone: ⌘C on files in Finder, or a pinch on the trackpad → «Получить»;
 ///  • screen: the phone watches and controls this Mac, or shows its own screen here.
-final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSWindowDelegate {
     private let daemon = Daemon()
     private let clipboard = ClipboardWatcher()
     private let pinch = PinchWatcher()
@@ -79,8 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         if !defaults.bool(forKey: Key.launched) {
             defaults.set(true, forKey: Key.launched)
-            try? SMAppService.mainApp.register() // start at login by default
-            state.launchAtLogin = SMAppService.mainApp.status == .enabled
+            // On-demand by default: no start at login (can be enabled in settings).
             notify("OneTouch в строке меню", "Файлы и экран между Mac и телефоном. Нажмите на значок ⇄ в строке меню.")
         }
         // Shown on start too: the menu-bar icon can hide behind the notch on a crowded menu bar.
@@ -93,6 +92,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return true
     }
 
+    /// Closing the window quits OneTouch completely (core included), unless a
+    /// screen session is running or the user chose to keep it at login.
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        if screenSessions.isEmpty && mirrorSessions.isEmpty && !state.launchAtLogin {
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
+
     private func showWindow() {
         refreshPermissions()
         updatePhones()
@@ -103,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             w.title = "OneTouch"
             w.titlebarAppearsTransparent = true
             w.isReleasedWhenClosed = false
+            w.delegate = self
             w.contentViewController = NSHostingController(rootView: PanelView(state: state, actions: panelActions()).padding(.top, 12))
             w.center()
             window = w
